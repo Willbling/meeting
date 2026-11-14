@@ -2,10 +2,11 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from itertools import groupby
 from time import time
 from typing import Iterator
 
-from .models import BEIJING, Attendee, Booking, BookingCreate, BookingDetail, Person, Room
+from .models import BEIJING, Attendee, Booking, BookingCreate, BookingDetail, BookingReschedule, Person, Room, RoomAvailability, TimeInterval
 
 
 class BookingError(Exception):
@@ -14,6 +15,16 @@ class BookingError(Exception):
         self.status = status
         self.code = code
         self.message = message
+
+
+BOOKING_SELECT = """
+    SELECT b.*, r.name AS room_name, r.address AS room_address,
+           host.name AS host_name, creator.name AS creator_name
+    FROM booking_state AS b
+    JOIN rooms AS r ON r.room_id = b.room_id
+    JOIN people AS host ON host.person_id = b.host_id
+    JOIN people AS creator ON creator.person_id = b.created_by
+"""
 
 
 def connect(path: Path) -> sqlite3.Connection:
@@ -26,8 +37,8 @@ def connect(path: Path) -> sqlite3.Connection:
 
 @contextmanager
 def transaction(db: sqlite3.Connection, *, write: bool = False) -> Iterator[None]:
-    db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
     try:
+        db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
         yield
         db.execute("COMMIT")
     except BaseException as error:
@@ -35,6 +46,12 @@ def transaction(db: sqlite3.Connection, *, write: bool = False) -> Iterator[None
             db.execute("ROLLBACK")
         if isinstance(error, sqlite3.IntegrityError) and str(error) == "room already booked for this time":
             raise BookingError(409, "ROOM_TIME_CONFLICT", "会议室在该时段已被预订") from error
+        if isinstance(error, sqlite3.OperationalError):
+            code = getattr(error, "sqlite_errorcode", 0) & 0xff
+            if code in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+                raise BookingError(503, "DATABASE_BUSY", "数据库正被其他操作占用，请稍后重试") from error
+            if code == sqlite3.SQLITE_READONLY:
+                raise BookingError(503, "DATABASE_READONLY", "会议室数据库当前无法写入，请检查文件和目录权限") from error
         raise
 
 
@@ -43,9 +60,18 @@ def require_person(db: sqlite3.Connection, person_id: str) -> None:
         raise BookingError(404, "PERSON_NOT_FOUND", f"找不到人员 {person_id}")
 
 
+def check_database(db: sqlite3.Connection) -> None:
+    db.execute("SELECT person_id, name, job_title, job_level FROM people LIMIT 0")
+    db.execute(BOOKING_SELECT + " LIMIT 0")
+    db.execute("SELECT booking_id, person_id, person_name, role FROM booking_attendees LIMIT 0")
+
+
 def list_people(db: sqlite3.Connection, name: str, limit: int, offset: int) -> list[Person]:
     rows = db.execute(
-        "SELECT person_id, name FROM people WHERE instr(name, ?) > 0 ORDER BY name, person_id LIMIT ? OFFSET ?",
+        """
+        SELECT person_id, name, job_title, job_level FROM people
+        WHERE instr(name, ?) > 0 ORDER BY name, person_id LIMIT ? OFFSET ?
+        """,
         (name, limit, offset),
     )
     return [Person(**row) for row in rows]
@@ -71,6 +97,61 @@ def list_rooms(
     return [Room(**row) for row in rows]
 
 
+def list_room_intervals(
+    db: sqlite3.Connection, name: str, capacity: int, start: int, end: int,
+    minimum_seconds: int, limit: int, offset: int,
+) -> list[RoomAvailability]:
+    rows = db.execute(
+        """
+        SELECT r.room_id, r.name, r.address, r.capacity, b.starts_at, b.ends_at
+        FROM rooms AS r
+        LEFT JOIN bookings AS b
+          ON b.room_id = r.room_id AND b.canceled_at IS NULL
+         AND b.starts_at < ? AND b.ends_at > ?
+        WHERE r.is_active = 1 AND instr(r.name, ?) > 0 AND r.capacity >= ?
+        ORDER BY r.name, r.room_id, b.starts_at
+        """,
+        (end, start, name, capacity),
+    )
+
+    def interval(left: int, right: int) -> TimeInterval:
+        return TimeInterval(starts_at=datetime.fromtimestamp(left, BEIJING), ends_at=datetime.fromtimestamp(right, BEIJING))
+
+    results = []
+    matched = 0
+    for room, bookings in groupby(rows, key=lambda row: (row["room_id"], row["name"], row["address"], row["capacity"])):
+        occupied: list[tuple[int, int]] = []
+        for row in bookings:
+            if row["starts_at"] is None:
+                continue
+            left, right = max(start, row["starts_at"]), min(end, row["ends_at"])
+            if occupied and left <= occupied[-1][1]:
+                occupied[-1] = (occupied[-1][0], max(occupied[-1][1], right))
+            else:
+                occupied.append((left, right))
+        free = []
+        cursor = start
+        fits = False
+        for left, right in [*occupied, (end, end)]:
+            if left > cursor:
+                free.append(interval(cursor, left))
+                fits |= left - cursor >= minimum_seconds
+            cursor = right
+        if not fits:
+            continue
+        matched += 1
+        if matched <= offset:
+            continue
+        room_id, room_name, address, seats = room
+        results.append(RoomAvailability(
+            room_id=room_id, name=room_name, address=address, capacity=seats,
+            free_intervals=free, busy_intervals=[interval(left, right) for left, right in occupied],
+        ))
+        if len(results) == limit:
+            break
+    return results
+
+
 def booking_values(row: sqlite3.Row) -> dict:
     values = dict(row)
     for column in ("starts_at", "ends_at", "canceled_at"):
@@ -84,8 +165,7 @@ def list_bookings(
     start: int | None, end: int | None, limit: int, offset: int,
 ) -> list[Booking]:
     rows = db.execute(
-        """
-        SELECT b.* FROM booking_status AS b
+        BOOKING_SELECT + """
         WHERE (b.created_by = ? OR b.host_id = ? OR EXISTS (
             SELECT 1 FROM booking_members AS m WHERE m.booking_id = b.booking_id AND m.person_id = ?
         ))
@@ -101,7 +181,7 @@ def list_bookings(
 
 
 def get_booking(db: sqlite3.Connection, booking_id: str) -> sqlite3.Row:
-    row = db.execute("SELECT * FROM booking_status WHERE booking_id = ?", (booking_id,)).fetchone()
+    row = db.execute(BOOKING_SELECT + " WHERE b.booking_id = ?", (booking_id,)).fetchone()
     if row is None:
         raise BookingError(404, "BOOKING_NOT_FOUND", "找不到该预约")
     return row
@@ -110,7 +190,7 @@ def get_booking(db: sqlite3.Connection, booking_id: str) -> sqlite3.Row:
 def booking_detail(db: sqlite3.Connection, row: sqlite3.Row) -> BookingDetail:
     attendees = db.execute(
         """
-        SELECT a.person_id, p.name, a.role
+        SELECT a.person_id, a.person_name AS name, a.role, p.job_title, p.job_level
         FROM booking_attendees AS a JOIN people AS p USING (person_id)
         WHERE a.booking_id = ? ORDER BY a.role = '主持人' DESC, a.person_id
         """,
@@ -174,17 +254,17 @@ def create_booking(db: sqlite3.Connection, actor: str, request: BookingCreate, s
 
 def require_editor(row: sqlite3.Row, actor: str) -> None:
     if actor not in (row["created_by"], row["host_id"]):
-        raise BookingError(403, "BOOKING_FORBIDDEN", "只有创建人和主持人可以改期或取消")
+        raise BookingError(403, "BOOKING_FORBIDDEN", "只有创建人和主持人可以编辑或取消")
 
 
 def require_waiting(row: sqlite3.Row, now: int) -> None:
     if row["canceled_at"] is not None or row["starts_at"] <= now:
-        raise BookingError(409, "BOOKING_NOT_WAITING", "只有等待开始的预约可以改期或取消")
+        raise BookingError(409, "BOOKING_NOT_WAITING", "只有等待开始的预约可以编辑或取消")
 
 
 def reschedule_booking(
     db: sqlite3.Connection, actor: str, booking_id: str, room_id: str | None,
-    start: int | None, end: int | None,
+    start: int | None, end: int | None, *, request: BookingReschedule | None = None,
 ) -> BookingDetail:
     with transaction(db, write=True):
         row = get_booking(db, booking_id)
@@ -195,14 +275,27 @@ def reschedule_booking(
         start = row["starts_at"] if start is None else start
         end = row["ends_at"] if end is None else end
         check_future_window(start, end, now)
-        member_count = db.execute(
-            "SELECT count(*) FROM booking_members WHERE booking_id = ?", (booking_id,)
-        ).fetchone()[0]
+        members = request.member_ids if request else None
+        if members is None:
+            member_count = db.execute(
+                "SELECT count(*) FROM booking_members WHERE booking_id = ?", (booking_id,)
+            ).fetchone()[0]
+        else:
+            if row["host_id"] in members:
+                raise BookingError(422, "HOST_IN_MEMBERS", "其他与会人员名单不能包含主持人")
+            for person_id in members:
+                require_person(db, person_id)
+            member_count = len(members)
         check_room(db, room_id, 1 + member_count)
+        subject = request.subject if request and request.subject is not None else row["subject"]
+        content = request.content if request and "content" in request.model_fields_set else row["content"]
         db.execute(
-            "UPDATE bookings SET room_id = ?, starts_at = ?, ends_at = ? WHERE booking_id = ?",
-            (room_id, start, end, booking_id),
+            "UPDATE bookings SET room_id = ?, starts_at = ?, ends_at = ?, subject = ?, content = ? WHERE booking_id = ?",
+            (room_id, start, end, subject, content, booking_id),
         )
+        if members is not None:
+            db.execute("DELETE FROM booking_members WHERE booking_id = ?", (booking_id,))
+            db.executemany("INSERT INTO booking_members VALUES (?, ?)", [(booking_id, person_id) for person_id in members])
         return booking_detail(db, get_booking(db, booking_id))
 
 

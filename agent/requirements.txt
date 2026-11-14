@@ -1,3 +1,4 @@
 -r ../mcp_server/requirements.txt
 jsonschema>=4.20,<5
 python-dotenv>=1,<2
+httpx2>=2,<3

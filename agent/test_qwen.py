@@ -1,4 +1,4 @@
-"""用项目 .env 中的 Ollama 配置测试会议室助手。"""
+"""测试 Ollama 中的 Qwen 会议室助手。"""
 
 import argparse
 import asyncio
@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 from dotenv import dotenv_values
+from mcp.shared.exceptions import MCPError
 
 from .main import AgentError, ChatModel, run_cli
 
@@ -14,10 +15,10 @@ from .main import AgentError, ChatModel, run_cli
 async def ping(base_url: str, model_name: str) -> None:
     async with httpx.AsyncClient(base_url=base_url + "/", timeout=60, trust_env=False) as http:
         model = ChatModel(http, model_name)
-        reply = await model.complete([{"role": "user", "content": "Reply with OK only."}], [])
-    if not reply.content or not reply.content.strip():
+        reply = await model.complete([{"role": "user", "content": "Reply with OK only."}])
+    if not (answer := reply.visible_content()):
         raise AgentError("Ollama 已返回响应，但模型答复为空。")
-    print(f"Ollama 模型 {model_name} 回复：{reply.content.strip()}")
+    print(f"Ollama 模型 {model_name} 回复：{answer}")
 
 
 def main() -> None:
@@ -32,7 +33,7 @@ def main() -> None:
     base_url = (config.get("OLLAMA_API_BASE") or "http://localhost:11434").strip().rstrip("/")
     if not base_url.endswith("/v1"):
         base_url += "/v1"
-    model = (config.get("OLLAMA_MODEL") or "deepseek-r1:1.5b").strip()
+    model = (os.getenv("MEETING_MODEL") or config.get("MEETING_MODEL") or "qwen3.5:4b").strip()
     try:
         if args.ping:
             asyncio.run(ping(base_url, model))
@@ -40,10 +41,9 @@ def main() -> None:
         os.environ.update({
             "MEETING_LLM_API_KEY": "", "MEETING_LLM_BASE_URL": base_url, "MEETING_MODEL": model,
         })
-        os.environ.setdefault("MEETING_PERSON_ID", "P000001")
         question = None if args.chat else (args.question or "请查一下周宁的人物编号。")
         asyncio.run(run_cli(question, trace=True, trust_env=False))
-    except (AgentError, httpx.InvalidURL) as error:
+    except (AgentError, MCPError, httpx.InvalidURL, httpx.RequestError, OSError) as error:
         raise SystemExit(str(error)) from None
     except KeyboardInterrupt:
         pass

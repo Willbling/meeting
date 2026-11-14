@@ -1,0 +1,14 @@
+[api]
+port = 8000
+# 相对路径以本配置文件所在目录为基准。
+database = "data/sqlite/meeting.db"
+
+[mcp]
+port = 8001
+
+[testing]
+# MCP 启动探测和命令行 Agent 的默认本地测试人员。
+person_id = "P000001"
+
+[startup]
+timeout_seconds = 20

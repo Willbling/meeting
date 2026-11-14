@@ -1,12 +1,12 @@
-INSERT INTO people (person_id, name, birthday, phone, email, wecom_user_id) VALUES
-    ('P000001', '林晓', '1991-03-18', '+12025550101', 'lin.xiao@example.com', 'sample_lin_xiao'),
-    ('P000002', '周宁', '1993-07-22', '+12025550102', 'zhou.ning@example.com', 'sample_zhou_ning'),
-    ('P000003', '陈宇', '1990-12-09', '+12025550103', 'chen.yu@example.com', NULL),
-    ('P000004', '许佳', '1995-01-16', '+12025550104', 'xu.jia@example.com', NULL),
-    ('P000005', '高远', '1988-08-30', '+12025550105', 'gao.yuan@example.com', NULL),
-    ('P000006', '沈悦', '1996-11-03', '+12025550106', 'shen.yue@example.com', NULL),
-    ('P000007', '罗晨', '1992-05-25', NULL, 'luo.chen@example.com', NULL),
-    ('P000008', '方敏', NULL, NULL, NULL, NULL);
+INSERT INTO people (person_id, name, birthday, phone, email, wecom_user_id, job_title, job_level) VALUES
+    ('P000001', '林晓', '1991-03-18', '+12025550101', 'lin.xiao@example.com', 'sample_lin_xiao', '项目经理', 'P6'),
+    ('P000002', '周宁', '1993-07-22', '+12025550102', 'zhou.ning@example.com', 'sample_zhou_ning', '产品经理', 'P5'),
+    ('P000003', '陈宇', '1990-12-09', '+12025550103', 'chen.yu@example.com', NULL, '软件工程师', 'P5'),
+    ('P000004', '许佳', '1995-01-16', '+12025550104', 'xu.jia@example.com', NULL, '交互设计师', 'P4'),
+    ('P000005', '高远', '1988-08-30', '+12025550105', 'gao.yuan@example.com', NULL, '采购主管', 'M1'),
+    ('P000006', '沈悦', '1996-11-03', '+12025550106', 'shen.yue@example.com', NULL, '培训专员', 'P4'),
+    ('P000007', '罗晨', '1992-05-25', NULL, 'luo.chen@example.com', NULL, '运维工程师', 'P5'),
+    ('P000008', '方敏', NULL, NULL, NULL, NULL, '行政专员', 'P4');
 
 INSERT INTO rooms (room_id, name, address, capacity, is_active) VALUES
     ('R000001', '三楼大会议室', '示例园区 A 座 3 层 301', 12, 1),

@@ -11,7 +11,9 @@ CREATE TABLE people (
     ),
     phone TEXT,
     email TEXT,
-    wecom_user_id TEXT UNIQUE CHECK (length(trim(wecom_user_id)) > 0)
+    wecom_user_id TEXT UNIQUE CHECK (length(trim(wecom_user_id)) > 0),
+    job_title TEXT CHECK (length(trim(job_title)) > 0),
+    job_level TEXT CHECK (length(trim(job_level)) > 0)
 ) STRICT;
 
 CREATE TABLE rooms (
@@ -47,7 +49,8 @@ CREATE TABLE booking_members (
     PRIMARY KEY (booking_id, person_id)
 ) STRICT;
 
-CREATE VIEW booking_status AS
+-- 业务查询使用 UTC Unix 秒，展示视图统一使用北京时间。
+CREATE VIEW booking_state AS
 SELECT bookings.*,
        CASE
            WHEN canceled_at IS NOT NULL THEN '取消'
@@ -57,10 +60,35 @@ SELECT bookings.*,
        END AS status
 FROM bookings;
 
+CREATE VIEW booking_status AS
+SELECT b.booking_id,
+       b.subject,
+       r.name AS room_name,
+       datetime(b.starts_at, 'unixepoch', '+8 hours') AS starts_at,
+       datetime(b.ends_at, 'unixepoch', '+8 hours') AS ends_at,
+       host.name AS host_name,
+       creator.name AS creator_name,
+       COALESCE((
+           SELECT group_concat(p.name, '、' ORDER BY m.person_id)
+           FROM booking_members AS m JOIN people AS p USING (person_id)
+           WHERE m.booking_id = b.booking_id
+       ), '') AS member_names,
+       b.status,
+       b.content,
+       datetime(b.canceled_at, 'unixepoch', '+8 hours') AS canceled_at
+FROM booking_state AS b
+JOIN rooms AS r USING (room_id)
+JOIN people AS host ON host.person_id = b.host_id
+JOIN people AS creator ON creator.person_id = b.created_by;
+
 CREATE VIEW booking_attendees AS
-SELECT booking_id, host_id AS person_id, '主持人' AS role FROM bookings
+SELECT b.booking_id, b.subject, p.name AS person_name, '主持人' AS role, p.person_id
+FROM bookings AS b JOIN people AS p ON p.person_id = b.host_id
 UNION ALL
-SELECT booking_id, person_id, '成员' AS role FROM booking_members;
+SELECT b.booking_id, b.subject, p.name, '成员', p.person_id
+FROM booking_members AS m
+JOIN bookings AS b USING (booking_id)
+JOIN people AS p USING (person_id);
 
 CREATE TRIGGER bookings_check_overlap_insert
 BEFORE INSERT ON bookings

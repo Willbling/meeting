@@ -45,6 +45,10 @@ class BookingApiTest(unittest.TestCase):
         path = f"/bookings/{created['booking_id']}"
         self.assertEqual(created["created_by"], "P000001")
         self.assertEqual(created["host_id"], "P000002")
+        self.assertEqual(created["room_name"], "三楼大会议室")
+        self.assertTrue(created["room_address"])
+        self.assertEqual(created["host_name"], "周宁")
+        self.assertEqual(created["creator_name"], "林晓")
         self.assertEqual(created["status"], "等待")
         self.assertTrue(created["starts_at"].endswith("+08:00"))
         self.assertEqual(datetime.fromisoformat(created["starts_at"]), self.start)
@@ -95,9 +99,39 @@ class BookingApiTest(unittest.TestCase):
         self.assertEqual(result.json()["code"], "ROOM_TIME_CONFLICT")
         self.assertEqual(self.client.get(path, headers=self.creator).json(), before)
 
+    def test_interval_availability_and_atomic_edit(self) -> None:
+        created = self.client.post("/bookings", json=self.body, headers=self.creator).json()
+        path = f"/bookings/{created['booking_id']}"
+        left = self.start - timedelta(minutes=30)
+        right = self.start + timedelta(hours=2)
+        params = {"starts_at": left.isoformat(), "ends_at": right.isoformat(), "mode": "intervals"}
+        rooms = self.client.get("/rooms", params=params).json()
+        room = next(item for item in rooms if item["room_id"] == "R000001")
+        self.assertEqual(len(room["free_intervals"]), 2)
+        self.assertEqual(len(room["busy_intervals"]), 1)
+        self.assertEqual(set(room["busy_intervals"][0]), {"starts_at", "ends_at"})
+        self.assertEqual([item["room_id"] for item in self.client.get(
+            "/rooms", params={**params, "min_duration_minutes": 61},
+        ).json()], ["R000002"])
+        denied = self.client.patch(path, json={"content": "说明"}, headers=self.member)
+        self.assertEqual(denied.status_code, 403)
+        updated = self.client.patch(
+            path, json={"subject": "新主题", "content": "说明", "member_ids": ["P000004"]}, headers=self.host,
+        ).json()
+        self.assertEqual(updated["subject"], "新主题")
+        self.assertEqual(updated["content"], "说明")
+        self.assertEqual([person["person_id"] for person in updated["attendees"]], ["P000002", "P000004"])
+        bad = self.client.patch(path, json={"subject": "不应保存", "member_ids": ["P000002"]}, headers=self.host)
+        self.assertEqual(bad.status_code, 422)
+        self.assertEqual(self.client.get(path, headers=self.host).json(), updated)
+        cleared = self.client.patch(path, json={"content": None, "member_ids": []}, headers=self.creator).json()
+        self.assertIsNone(cleared["content"])
+        self.assertEqual(len(cleared["attendees"]), 1)
+
     def test_queries_and_validation(self) -> None:
         result = self.client.get("/people", params={"name": "林晓"})
-        self.assertEqual(result.json(), [{"person_id": "P000001", "name": "林晓"}])
+        self.assertEqual(result.json(), [{"person_id": "P000001", "name": "林晓", "job_title": "项目经理", "job_level": "P6"}])
+        self.assertEqual(self.client.get("/readyz").json(), {"status": "ready"})
         self.assertEqual(self.client.get("/rooms").status_code, 200)
         self.assertEqual(self.client.get("/rooms", params={"min_capacity": 8}).json()[0]["room_id"], "R000001")
         window = {key: self.body[key] for key in ("starts_at", "ends_at")}

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ValidationError
 from api.models import ErrorResponse
 
 
+ACTOR_META_KEY = "meeting/person-id"
 ResponseModel = TypeVar("ResponseModel", bound=BaseModel)
 
 
@@ -19,12 +20,15 @@ def result(payload: dict, *, is_error: bool = False) -> CallToolResult:
     )
 
 
-def api_error(code: str, message: str) -> CallToolResult:
-    return result({"code": code, "message": message}, is_error=True)
+def api_error(code: str, message: str, *, http_status: int | None = None) -> CallToolResult:
+    payload = {"code": code, "message": message}
+    if http_status is not None:
+        payload["http_status"] = http_status
+    return result(payload, is_error=True)
 
 
 class MeetingApi:
-    def __init__(self, base_url: str, actor: str) -> None:
+    def __init__(self, base_url: str, actor: str | None) -> None:
         url = httpx.URL(base_url)
         if url.scheme not in {"http", "https"} or not url.host:
             raise ValueError("MEETING_API_URL 必须是 HTTP 或 HTTPS 地址")
@@ -48,7 +52,7 @@ class MeetingApi:
         async with httpx.AsyncClient(base_url=self.base_url, trust_env=False, timeout=10.0) as client:
             try:
                 response = await client.request(
-                    method, path, params=query, json=body, headers={"X-Person-ID": self.actor},
+                    method, path, params=query, json=body, headers={"X-Person-ID": self.actor} if self.actor else None,
                 )
             except httpx.ConnectError:
                 return api_error("API_UNAVAILABLE", "无法连接会议室 API，请检查 FastAPI 是否已启动")
@@ -57,14 +61,17 @@ class MeetingApi:
             except httpx.RequestError:
                 return api_error("API_UNAVAILABLE", f"无法完成与会议室 API 的通信{uncertain}")
 
-        if 400 <= response.status_code < 500:
+        if not response.is_success:
+            status = response.status_code
             try:
                 error = ErrorResponse.model_validate_json(response.content)
             except ValidationError:
-                return api_error("API_REQUEST_FAILED", f"会议室 API 拒绝了请求（HTTP {response.status_code}）")
-            return result(error.model_dump(mode="json", exclude_none=True), is_error=True)
-        if not response.is_success:
-            return api_error("API_REQUEST_FAILED", f"会议室 API 请求失败（HTTP {response.status_code}）{uncertain}")
+                error = None
+            if error and (400 <= status < 500 or error.code in {"DATABASE_BUSY", "DATABASE_READONLY"}):
+                return result({**error.model_dump(mode="json", exclude_none=True), "http_status": status}, is_error=True)
+            if 400 <= status < 500:
+                return api_error("API_REQUEST_REJECTED", f"会议室 API 拒绝了请求（HTTP {status}）", http_status=status)
+            return api_error("API_REQUEST_FAILED", f"会议室 API 请求失败（HTTP {status}）{uncertain}", http_status=status)
 
         try:
             data = response.json()

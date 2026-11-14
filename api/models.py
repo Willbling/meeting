@@ -12,6 +12,7 @@ RoomId = Annotated[str, StringConstraints(pattern=r"^R[0-9]{6}$", min_length=7, 
 BookingId = Annotated[str, StringConstraints(pattern=r"^A[0-9]{6}$", min_length=7, max_length=7)]
 Subject = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 BookingStatus = Literal["等待", "会议中", "取消", "结束"]
+AvailabilityMode = Literal["full", "intervals"]
 
 
 def require_iso_datetime(value: object) -> object:
@@ -48,6 +49,8 @@ class ErrorResponse(BaseModel):
 class Person(BaseModel):
     person_id: PersonId
     name: str
+    job_title: str | None = None
+    job_level: str | None = None
 
 
 class Room(BaseModel):
@@ -57,6 +60,16 @@ class Room(BaseModel):
     capacity: int
 
 
+class TimeInterval(BaseModel):
+    starts_at: datetime
+    ends_at: datetime
+
+
+class RoomAvailability(Room):
+    free_intervals: list[TimeInterval]
+    busy_intervals: list[TimeInterval]
+
+
 class Attendee(Person):
     role: Literal["主持人", "成员"]
 
@@ -64,8 +77,12 @@ class Attendee(Person):
 class Booking(BaseModel):
     booking_id: BookingId
     room_id: RoomId
+    room_name: str
+    room_address: str
     host_id: PersonId
+    host_name: str
     created_by: PersonId
+    creator_name: str
     starts_at: datetime
     ends_at: datetime
     subject: str
@@ -105,9 +122,16 @@ class BookingReschedule(RequestBody):
     room_id: RoomId | None = None
     starts_at: ApiDatetime | None = None
     ends_at: ApiDatetime | None = None
+    subject: Subject | None = None
+    content: str | None = None
+    member_ids: list[PersonId] | None = None
 
     @model_validator(mode="after")
     def validate_changes(self) -> "BookingReschedule":
-        if not self.model_fields_set or any(getattr(self, field) is None for field in self.model_fields_set):
-            raise ValueError("Provide at least one non-null field to change")
+        if not self.model_fields_set or any(
+            getattr(self, field) is None for field in self.model_fields_set - {"content"}
+        ):
+            raise ValueError("Provide at least one change; only content may be null")
+        if self.member_ids is not None and len(self.member_ids) != len(set(self.member_ids)):
+            raise ValueError("member_ids must be unique")
         return self

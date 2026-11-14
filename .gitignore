@@ -13,3 +13,4 @@ __pycache__/
 /data/sqlite/*.sqlite-*
 /data/sqlite/*.sqlite3
 /data/sqlite/*.sqlite3-*
+/data/wecom_memory/

@@ -11,8 +11,8 @@ from fastapi.responses import JSONResponse
 
 from . import store
 from .models import (
-    ApiDatetime, Booking, BookingCreate, BookingDetail, BookingId, BookingReschedule,
-    BookingStatus, ErrorResponse, Person, PersonId, Room, RoomId, timestamp,
+    ApiDatetime, AvailabilityMode, Booking, BookingCreate, BookingDetail, BookingId, BookingReschedule,
+    BookingStatus, ErrorResponse, Person, PersonId, Room, RoomAvailability, RoomId, timestamp,
 )
 from .store import BookingError
 
@@ -32,7 +32,7 @@ Database = Annotated[sqlite3.Connection, Depends(get_db)]
 
 def get_actor(db: Database, actor: Annotated[PersonId | None, Header(alias="X-Person-ID")] = None) -> str:
     if actor is None:
-        raise BookingError(401, "ACTOR_REQUIRED", "请通过 X-Person-ID 指定本地测试身份")
+        raise BookingError(401, "ACTOR_REQUIRED", "请通过 X-Person-ID 指定操作者身份")
     store.require_person(db, actor)
     return actor
 
@@ -60,7 +60,7 @@ def create_app(database: Path | None = None) -> FastAPI:
     app = FastAPI(title="会议室预订 API", responses={422: {"model": ErrorResponse}})
     app.state.database = database if database is not None else Path(os.getenv("MEETING_DB_PATH") or DEFAULT_DATABASE)
     booking_errors = {status: {"model": ErrorResponse} for status in (401, 403, 404)}
-    booking_write_errors = {**booking_errors, 409: {"model": ErrorResponse}}
+    booking_write_errors = {**booking_errors, 409: {"model": ErrorResponse}, 503: {"model": ErrorResponse}}
 
     @app.exception_handler(BookingError)
     async def booking_error(request: Request, error: BookingError) -> JSONResponse:
@@ -77,20 +77,38 @@ def create_app(database: Path | None = None) -> FastAPI:
             },
         )
 
+    @app.get("/readyz", responses={503: {"model": ErrorResponse}})
+    def ready(request: Request) -> dict[str, str]:
+        try:
+            with closing(store.connect(request.app.state.database)) as db:
+                store.check_database(db)
+        except sqlite3.Error as error:
+            raise BookingError(503, "DATABASE_UNAVAILABLE", "会议室数据库不可用或结构不匹配") from error
+        return {"status": "ready"}
+
     @app.get("/people", response_model=list[Person])
     def people(db: Database, name: str = "", limit: Limit = 50, offset: Offset = 0) -> list[Person]:
         return store.list_people(db, name.strip(), limit, offset)
 
-    @app.get("/rooms", response_model=list[Room])
+    @app.get("/rooms", response_model=list[RoomAvailability | Room])
     def rooms(
         db: Database, name: str = "", min_capacity: Annotated[int, Query(ge=1, le=2**63 - 1)] = 1,
         starts_at: ApiDatetime | None = None, ends_at: ApiDatetime | None = None,
         limit: Limit = 50, offset: Offset = 0,
-    ) -> list[Room]:
+        mode: AvailabilityMode = "full",
+        min_duration_minutes: Annotated[int | None, Query(ge=1, le=10080)] = None,
+    ) -> list[Room] | list[RoomAvailability]:
         if (starts_at is None) != (ends_at is None):
             raise BookingError(422, "INVALID_TIME_RANGE", "查询空闲会议室需同时提供开始和结束时间")
         start, end = time_parameter(starts_at), time_parameter(ends_at)
         check_time_order(start, end)
+        if mode == "intervals":
+            if start is None or end is None:
+                raise BookingError(422, "INVALID_TIME_RANGE", "区间查房需要开始和结束时间")
+            return store.list_room_intervals(db, name.strip(), min_capacity, start, end,
+                                             min_duration_minutes * 60 if min_duration_minutes else 1, limit, offset)
+        if min_duration_minutes is not None:
+            raise BookingError(422, "INVALID_AVAILABILITY_MODE", "最短时长仅用于区间查房")
         return store.list_rooms(db, name.strip(), min_capacity, start, end, limit, offset)
 
     @app.get("/bookings", response_model=list[Booking], responses={401: {"model": ErrorResponse}, 404: {"model": ErrorResponse}})
@@ -114,7 +132,7 @@ def create_app(database: Path | None = None) -> FastAPI:
     @app.patch("/bookings/{booking_id}", response_model=BookingDetail, responses=booking_write_errors)
     def reschedule(db: Database, actor: Actor, booking_id: BookingId, body: BookingReschedule) -> BookingDetail:
         start, end = time_parameter(body.starts_at), time_parameter(body.ends_at)
-        return store.reschedule_booking(db, actor, booking_id, body.room_id, start, end)
+        return store.reschedule_booking(db, actor, booking_id, body.room_id, start, end, request=body)
 
     @app.post("/bookings/{booking_id}/cancel", response_model=BookingDetail, responses=booking_write_errors)
     def cancel(db: Database, actor: Actor, booking_id: BookingId) -> BookingDetail:

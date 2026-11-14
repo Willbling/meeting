@@ -1,48 +1,61 @@
 # 会议室命令行智能体
 
-程序连接现有的 MCP 服务，通过支持函数调用的 Chat Completions 模型完成多轮预约对话。模型服务会收到对话内容和用于回答的会议工具结果。命令行退出后，本次对话历史随进程清除。
-
-在项目根目录打开 PowerShell，使用 Conda 的 py313 环境启动 FastAPI。
+在项目根目录用 Conda 的 `py313` 启动 FastAPI 和 MCP，供会议室请求使用。普通聊天只需要 Ollama。
 
 ```powershell
 conda activate py313
 python -m pip install -r api/requirements.txt -r agent/requirements.txt
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+python -X utf8 start_services.py
 ```
 
-保持 FastAPI 运行，在另一个 PowerShell 窗口设置模型和本地测试身份。模型地址填基础地址，例如 `https://api.openai.com/v1`。程序会拼接 `chat/completions`。换用其他兼容服务时，填该服务的地址、模型和密钥。
+保持 Ollama 运行，并确保 `ollama list` 中有 `qwen3.5:4b`。在另一个终端进入同一项目目录。
 
 ```powershell
 conda activate py313
-$env:MEETING_LLM_BASE_URL = 'https://api.openai.com/v1'
-$env:MEETING_MODEL = '替换为支持工具调用的模型名'
-$env:MEETING_PERSON_ID = 'P000001'
-$env:MEETING_LLM_API_KEY = Read-Host '输入模型 API 密钥' -MaskInput
 python -X utf8 -m agent.main
+# 单次只读查询与调用诊断
+python -X utf8 -m agent.main --trace "查 A000002"
 ```
 
-智能体会自动启动 stdio MCP 子进程。API 默认位于 `http://127.0.0.1:8000`，也可以通过 `MEETING_API_URL` 指定。兼容的本地模型服务如果允许匿名请求，可以省略密钥。输入 `/exit` 结束对话。
-
-可以先输入「帮我查一下明天有哪些会议」，再试「帮周宁订明天下午两点到三点的会议室，任选一间，主题是需求评审」。后一句会向当前 FastAPI 所用的数据库写入预约。系统提示词和示例在 `prompts.md`。
-
-## 用 Ollama 测试 DeepSeek-R1
-
-测试脚本读取项目根目录 `.env` 中的 `OLLAMA_API_BASE` 和 `OLLAMA_MODEL`，默认使用 `http://localhost:11434` 和 `deepseek-r1:1.5b`。脚本自动补上 Ollama 兼容接口的 `/v1`，本地 Ollama 无需 API 密钥。保持 Ollama 运行，在项目根目录用 `py313` 执行 `python -X utf8 -m agent.test_deepseek --ping`，验证模型能否应答。
-
-测试预约功能时，先启动上面的 FastAPI，再在另一个 PowerShell 窗口运行以下命令。脚本默认用样例人物 `P000001`，并打印模型实际调用的工具和结果状态。
+默认使用 `qwen3.5:4b`、`http://localhost:11434` 和 `http://127.0.0.1:8001/mcp`。`OLLAMA_API_BASE`、`MEETING_MODEL` 可写进项目的 `.env` 或由环境变量覆盖。自定义 MCP 地址时设置 `MEETING_MCP_URL`。命令行 Agent 默认使用 `services.toml` 中的 `testing.person_id`，可用 `--config` 读取其他配置文件。用下面的命令可以为当前命令行会话指定其他测试身份，无需重启 MCP。兼容 Chat Completions 的服务可用 `MEETING_LLM_BASE_URL` 和 `MEETING_LLM_API_KEY` 配置，模型服务需要支持 JSON Schema 输出。
 
 ```powershell
-# 默认查询周宁，预期编号为 P000002
-python -X utf8 -m agent.test_deepseek
-
-# 只读测试
-python -X utf8 -m agent.test_deepseek "查一下我有哪些预约，列出申请编号和状态"
-python -X utf8 -m agent.test_deepseek "查明天下午两点到三点能坐 8 人的空闲会议室"
-
-# 多轮测试
-python -X utf8 -m agent.test_deepseek --chat
+python -X utf8 -m agent.main --person-id P000002 --trace
 ```
 
-单次测试以至少一个工具成功返回为通过条件。只有「模型原始回复」且没有成功的工具轨迹时，表示模型没有取得查询结果。本机的 `deepseek-r1:1.5b` 实测可以应答，但在查人样例中没有发出工具调用。单独检查 MCP 时，可在 FastAPI 运行后执行 `python -X utf8 mcp_test.py`。
+## 对话示例
 
-多轮模式可以先说「帮周宁订明天下午两点到三点的会议室，任选一间，主题是联调测试」，成功后用实际返回的申请编号继续说「把这场改到明天下午三点到四点」，再说「取消这场会议」。这些操作会修改当前 FastAPI 所连接的数据库。
+- 可以问「你有什么功能」，主助手会介绍查空房、查预约、预订、改期和取消。也可以直接聊天。
+- 「查查我明天的会议室安排」会按北京时间查询明天一整天与自己相关的预约。
+- 输入「明天下午查个能坐 8 人的会议室」，可以查看每间房的空闲段和占用段。也可说「在下午两点到五点间，有连续一小时空闲的房间」。选房后确认实际预订时段，或明确授权「在这个范围任选一小时」。
+- 输入「帮周宁订后天上午 10 点至 11 点的会议室，主题是排期评审」。按提示补齐信息或选择会议室。核对申请后回复「确认」。
+- 输入「把 A000002 改到后天下午 2 点至 3 点」或「取消明天的评审」。当查询到多个预约时，按提示选一场。核对申请后回复「确认改期」或「确认取消」。
+- 已提交的预约也能编辑主题、内容和成员，例如「给刚才预订的会议补充内容：9月份工作总结与10月安排，再加陈宇」。确认后更新同一申请编号。
+- 中途可查其他信息，原申请草稿可用「继续申请」重新核对。修改条件后会重新生成申请。用「放弃申请」清除草稿，输入 `/exit` 退出。
+
+## 申请条件和执行规则
+
+宽范围查房默认上午 08:00–12:00、下午 13:00–18:00、晚上 18:00–22:00。可在启动 Agent 的环境里设置 `MEETING_MORNING_HOURS`、`MEETING_AFTERNOON_HOURS` 或 `MEETING_EVENING_HOURS`，取值如 `13:30-18:00`。
+
+- **预订**需要未来的起止时间、主题、主持人和符合容量且空闲的会议室。默认本人主持，按姓名代订或添加成员时会先查人。用户未指定房间、也未授权任选且有多间可用时，会请用户选择。
+- **改期**需要唯一、待开始且有操作权限的预约，以及至少一项实际变化。改时间时保留未修改的起止字段，改房时保留未修改的时段。确认前重新核对原预约，最终冲突检查由 API 执行。
+- **取消**需要唯一、待开始且有操作权限的预约。查询候选后，核对会议主题、时间、房间和申请编号再确认。
+- 三种申请都在收到明确确认后提交。成功回执采用 MCP 返回的真实结果。工具无法回答时会给出原因，例如无候选、权限不足、条件冲突或 API 暂时不可用。写入结果不明确时用「核实结果」查询，核实期间不会重复写入。手动查看预约后，可用「结束核实」清除本会话的待核实记录。
+
+## 模型和上下文
+
+主 Agent 和会议室子 Agent 默认都用 `qwen3.5:4b`。主 Agent 每轮先判断话题。普通聊天发送职责介绍、较早对话的滚动摘要、最近四轮普通对话和当前消息。近期历史中的每轮用户输入和助手回复分别最多保留 600 和 1000 字符。第五轮完成后，同一个 Qwen 开始把移出窗口的对话合并进摘要，摘要最多保留 800 字符。摘要只在当前进程内保存。
+
+会议请求会透传用户原话给子 Agent。子 Agent 使用自己的草稿、候选和最近三轮会议对话，按需调用 MCP。普通聊天的摘要和会议草稿各自保留。模型返回的独立推理字段不进入历史或摘要，正文中带 `<think>` 标签的推理也会过滤。
+
+信息不足时，子 Agent 返回问题原因、缺失字段和建议。主 Agent 根据原话和草稿决定如何追问、直接回答，还是带着解析建议让子 Agent 重试一次。重试可补齐原话中已有的信息，提交仍由独立的用户确认触发。申请、候选和预约状态的关键事实保留原值，方便核对。
+
+主 Agent 会记住实际向用户提出的会议追问。用户可以直接回答主题或时间，无需重复「会议主题是」等前缀。预订时可先给日期和时长，补充开始时间后由程序计算结束时间。
+
+主、子 Agent 共用当前命令行会话的会议状态，包括最近预约查询的范围、候选及是否完整、编辑草稿、待确认申请、上一轮追问和最近已办理的预约。比如查完明天的预约后，说「给明天的会议加上会议内容」会按原定日期重新核对可编辑预约。只有一场时直接展示修改申请，多场时可用简称或序号选择。普通聊天继续使用独立历史和摘要。
+
+主 Agent 在第一次收到会议请求时连接 MCP。聊天时仍可保留会议草稿，回复「继续申请」可回到会议流程。使用 `--trace` 可以查看分流、输入 token、子 Agent 意图和 MCP 调用结果。各模型请求只携带当前步骤需要的上下文。
+
+草稿和待核实记录保存在当前进程，退出后会清除。请在退出前核实结果不明的写入。企业微信仍使用其现有的独立对话入口。
+
+单独检查 Ollama，可运行 `python -X utf8 -m agent.test_qwen --ping`。回归测试可运行 `python -B -m unittest agent.test_workflow api.test_bookings mcp_server.test_stdio -v`。
