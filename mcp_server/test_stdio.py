@@ -1,0 +1,112 @@
+import asyncio
+import os
+import socket
+import subprocess
+import sys
+import unittest
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+import httpx
+from mcp import Client, StdioServerParameters
+
+from data.sqlite.init_db import initialize
+
+
+PROJECT = Path(__file__).resolve().parents[1]
+
+
+class MeetingMcpTest(unittest.IsolatedAsyncioTestCase):
+    def local_client(self, api_url: str, actor: str) -> Client:
+        return Client(StdioServerParameters(
+            command=sys.executable, args=["-B", "-m", "mcp_server.server"], cwd=PROJECT,
+            env={"MEETING_API_URL": api_url, "MEETING_PERSON_ID": actor},
+        ))
+
+    async def test_stdio_booking_lifecycle(self) -> None:
+        directory = self.enterContext(TemporaryDirectory())
+        database = Path(directory) / "test.db"
+        initialize(database)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        api_url = f"http://127.0.0.1:{port}"
+        with subprocess.Popen(
+            [sys.executable, "-B", "-m", "uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", str(port)],
+            cwd=PROJECT, env={**os.environ, "MEETING_DB_PATH": str(database)},
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        ) as server:
+            try:
+                async with httpx.AsyncClient(base_url=api_url, trust_env=False, timeout=0.5) as http:
+                    for _ in range(40):
+                        if server.poll() is not None:
+                            self.fail(server.stderr.read().decode(errors="replace"))
+                        try:
+                            (await http.get("/openapi.json")).raise_for_status()
+                            break
+                        except httpx.TransportError:
+                            await asyncio.sleep(0.2)
+                    else:
+                        self.fail("FastAPI did not start")
+                await asyncio.wait_for(self.check_tools(api_url), timeout=30)
+            finally:
+                server.terminate()
+
+    async def check_tools(self, api_url: str) -> None:
+        async with (
+            self.local_client(api_url, "P000001") as creator,
+            self.local_client(api_url, "P000002") as host,
+            self.local_client(api_url, "P000003") as member,
+        ):
+            tools = {tool.name: tool for tool in (await creator.list_tools()).tools}
+            self.assertEqual(set(tools), {
+                "find_people", "find_available_rooms", "list_my_bookings", "get_booking",
+                "create_booking", "reschedule_booking", "cancel_booking",
+            })
+            self.assertTrue(all(tool.output_schema for tool in tools.values()))
+            self.assertNotIn("person_id", tools["create_booking"].input_schema["properties"])
+
+            async def call(client: Client, tool_name: str, **params) -> dict:
+                response = await client.call_tool(tool_name, params)
+                self.assertFalse(response.is_error, response.content)
+                self.assertIsNotNone(response.structured_content)
+                return response.structured_content
+
+            person = (await call(creator, "find_people", name="周宁"))["items"][0]
+            start = datetime.now(UTC).replace(microsecond=0) + timedelta(days=7)
+            window = {"starts_at": start.isoformat(), "ends_at": (start + timedelta(hours=1)).isoformat()}
+            rooms = (await call(creator, "find_available_rooms", min_capacity=8, **window))["items"]
+            self.assertEqual([room["room_id"] for room in rooms], ["R000001"])
+            reservation = {
+                **window, "room_id": rooms[0]["room_id"], "host_id": person["person_id"],
+                "subject": "MCP 联调会议", "member_ids": ["P000003"],
+            }
+            booking = await call(creator, "create_booking", **reservation)
+            booking_id = booking["booking_id"]
+            self.assertEqual(booking["created_by"], "P000001")
+            self.assertEqual(booking["host_id"], "P000002")
+            self.assertTrue(booking["starts_at"].endswith("+08:00"))
+            details = await call(member, "get_booking", booking_id=booking_id)
+            self.assertEqual([person["role"] for person in details["attendees"]], ["主持人", "成员"])
+            bookings = await call(host, "list_my_bookings", status="等待", **window)
+            self.assertEqual([item["booking_id"] for item in bookings["items"]], [booking_id])
+
+            duplicate = await host.call_tool("create_booking", reservation)
+            self.assertTrue(duplicate.is_error)
+            self.assertEqual(duplicate.structured_content["code"], "ROOM_TIME_CONFLICT")
+            self.assertIn("ROOM_TIME_CONFLICT", duplicate.content[0].text)
+            forbidden = await member.call_tool("cancel_booking", {"booking_id": booking_id})
+            self.assertTrue(forbidden.is_error)
+            self.assertEqual(forbidden.structured_content["code"], "BOOKING_FORBIDDEN")
+            invalid = await host.call_tool("reschedule_booking", {"booking_id": booking_id})
+            self.assertTrue(invalid.is_error)
+            self.assertEqual(invalid.structured_content["code"], "VALIDATION_ERROR")
+
+            moved = await call(host, "reschedule_booking", booking_id=booking_id, room_id="R000002")
+            self.assertEqual(moved["room_id"], "R000002")
+            canceled = await call(creator, "cancel_booking", booking_id=booking_id)
+            self.assertEqual(canceled["status"], "取消")
+            self.assertEqual(await call(host, "cancel_booking", booking_id=booking_id), canceled)
+            replacement = await call(creator, "create_booking", **{**reservation, "room_id": "R000002"})
+            self.assertNotEqual(replacement["booking_id"], booking_id)
