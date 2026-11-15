@@ -4,11 +4,10 @@
 
 ## 本地运行
 
-推荐使用[一键启动脚本](../README.md#本地启动)。也可以单独启动。在项目根目录使用 Conda `py313` 环境安装依赖并启动 API。
+推荐使用[一键启动脚本](../README.md#本地启动)。也可以单独启动。安装根目录依赖后，先按 [API 文档](api.md)初始化数据库，再在项目根目录启动 API。
 
 ```powershell
 conda activate py313
-python -m pip install -r api/requirements.txt -r mcp_server/requirements.txt
 python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 

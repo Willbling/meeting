@@ -24,7 +24,7 @@ python data/sqlite/init_db.py --database data/sqlite/meeting_fresh.db
 
 可以在 SQLite 客户端打开生成的文件，使用下面的样例 SQL 查看数据。FastAPI 和企业微信程序默认读取 `meeting.db`。使用其他文件时，在两个程序各自的启动终端设置相同的绝对路径，例如 `$env:MEETING_DB_PATH = (Resolve-Path data/sqlite/meeting_fresh.db).Path`。
 
-新库的企业微信 UserID 是样例值。需要用实际账号联调时，按[企业微信使用说明](../../wecom/README.md)重新绑定。使用 SQLite 客户端手动写入数据前，应为当前连接执行 `PRAGMA foreign_keys = ON;`。
+新库的企业微信 UserID 是样例值。需要用实际账号联调时，按[企业微信使用说明](wecom.md)重新绑定。使用 SQLite 客户端手动写入数据前，应为当前连接执行 `PRAGMA foreign_keys = ON;`。
 
 ## 表和字段
 

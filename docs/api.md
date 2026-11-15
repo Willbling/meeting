@@ -1,10 +1,10 @@
 # 会议室预订 API
 
-在项目根目录使用 Conda 的 `py313` 环境启动。
+按[根目录启动说明](../README.md#本地启动)安装依赖。从项目根目录初始化 SQLite 并单独启动 API。
 
 ```powershell
 conda activate py313
-python -m pip install -r api/requirements.txt
+python data/sqlite/init_db.py
 python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
@@ -35,6 +35,5 @@ python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 测试会初始化临时 SQLite 文件，覆盖代订、主持人改期、创建人取消、原时段重新预订和并发冲突。
 
 ```powershell
-python -m pip install httpx
 python -B -m unittest api.test_bookings -v
 ```

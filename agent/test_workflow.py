@@ -8,6 +8,7 @@ import httpx
 from api.models import BEIJING
 
 from .main import ChatModel, MainAgent, MeetingAgent, ModelMessage
+from .workflow_models import Application
 
 
 class WorkflowTest(unittest.IsolatedAsyncioTestCase):
@@ -178,6 +179,74 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(params["starts_at"], f"{tomorrow}T00:00:00+08:00")
         self.assertEqual(params["ends_at"], f"{tomorrow + timedelta(days=1)}T00:00:00+08:00")
 
+    async def test_compound_queries_return_both_results_for_the_same_day(self) -> None:
+        main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
+        now = datetime.now(BEIJING)
+        tomorrow = now.date() + timedelta(days=1)
+        self.responses.extend([
+            {"route": "meeting", "queries": [
+                {"intent": "bookings", "text": "查看我明天的会议安排"},
+                {"intent": "rooms", "text": "查询明天下午的空闲会议室"},
+            ]},
+            {"date_hint": "明天"},
+            {"date_hint": "明天", "day_part": "afternoon"},
+        ])
+        original = "看看我明天的会议安排和下午的空闲会议室"
+        reply = await main.reply(original, request_time=now)
+        self.assertIn("【你的会议安排】", reply)
+        self.assertIn("【空闲会议室】", reply)
+        self.assertIn(self.room["name"], reply)
+        (list_call, rooms_call) = self.mock_tool.await_args_list
+        self.assertEqual(list_call.args[0], "list_my_bookings")
+        self.assertEqual(list_call.args[1]["starts_at"], f"{tomorrow}T00:00:00+08:00")
+        self.assertEqual(rooms_call.args[0], "find_available_rooms")
+        self.assertEqual(rooms_call.args[1]["starts_at"], f"{tomorrow}T13:00:00+08:00")
+        self.assertEqual(rooms_call.args[1]["ends_at"], f"{tomorrow}T18:00:00+08:00")
+        self.assertEqual(self.agent.workflow.query.intent, "rooms")
+        self.assertIsNotNone(self.agent.workflow.booking_search)
+        self.assertEqual([turn.user for turn in self.agent.history], [original])
+
+    async def test_compound_query_keeps_completed_result_and_question_for_the_other(self) -> None:
+        main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
+        pending = Application("cancel", {"booking_id": self.booking["booking_id"]}, "原待确认申请")
+        self.agent.workflow.pending = pending
+        self.responses.extend([
+            {"route": "meeting", "queries": [
+                {"intent": "rooms", "text": "查询明日空闲会议室"},
+                {"intent": "bookings", "text": "查询今天我的预约"},
+            ]},
+            {"date_hint": "明天"},
+            {"action": "ask", "message": "明天想查几点到几点？", "requested_fields": ["starts_at", "ends_at"]},
+            {"date_hint": "今天"},
+        ])
+        reply = await main.reply("查查明天的空房，还有我今天的预约")
+        self.assertIn("明天几点到几点", reply)
+        self.assertIn("【你的会议安排】", reply)
+        self.assertEqual(main.meeting_question.fields, ("starts_at", "ends_at"))
+        self.assertEqual(self.agent.workflow.query.intent, "rooms")
+        self.assertIs(self.agent.workflow.pending, pending)
+        self.assertEqual([call.args[0] for call in self.mock_tool.await_args_list], ["list_my_bookings"])
+
+    async def test_compound_query_applies_shared_afternoon_to_both_tools(self) -> None:
+        main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
+        now = datetime.now(BEIJING)
+        tomorrow = now.date() + timedelta(days=1)
+        self.responses.extend([
+            {"route": "meeting", "queries": [
+                {"intent": "bookings", "text": "查看我明天下午的会议安排"},
+                {"intent": "rooms", "text": "查看明天下午的空闲会议室"},
+            ]},
+            {"date_hint": "明天", "starts_at": f"{tomorrow}T00:00:00+08:00",
+             "ends_at": f"{tomorrow + timedelta(days=1)}T00:00:00+08:00"},
+            {"date_hint": "明天"},
+        ])
+        reply = await main.reply("看看我明天下午的会议安排和空闲会议室", request_time=now)
+        self.assertIn("13:00–18:00", reply)
+        self.assertEqual([c.args[0] for c in self.mock_tool.await_args_list], ["list_my_bookings", "find_available_rooms"])
+        for call in self.mock_tool.await_args_list:
+            self.assertEqual(call.args[1]["starts_at"], f"{tomorrow}T13:00:00+08:00")
+            self.assertEqual(call.args[1]["ends_at"], f"{tomorrow}T18:00:00+08:00")
+
     async def test_today_overrides_model_repeating_tomorrows_bounds(self) -> None:
         main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
         today = datetime.now(BEIJING).date()
@@ -238,6 +307,7 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("主助手的解析建议", self.requests[-2]["messages"][-1]["content"])
         self.assertFalse(self.saved)
         self.assertEqual(len(self.agent.history), 1)
+        self.assertEqual([message.text for message in self.agent.workflow.draft.user_messages], ["订个会议室开评审"])
 
     async def test_main_agent_asks_only_for_missing_information(self) -> None:
         main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
@@ -253,7 +323,7 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
         day = self.times["starts_at"][:10]
         self.responses.extend([
-            {"route": "meeting"},
+            {"route": "meeting", "new_request": True, "start_booking": True},
             {"host": "", "members": ["我", "陈宇"], "date_hint": day},
             {"action": "ask", "message": "请问明天的会议主题是什么？", "requested_fields": ["subject"]},
             {"route": "meeting"}, {"subject": "降雨预测阶段总结"},
@@ -271,6 +341,77 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(arguments["ends_at"], (datetime.fromisoformat(arguments["starts_at"]) + timedelta(hours=2)).isoformat())
         self.assertEqual(arguments["member_ids"], ["P000003"])
         self.assertFalse(self.saved)
+
+    async def test_booking_follow_up_recovers_time_room_and_people_from_user_history(self) -> None:
+        main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
+        at = datetime.now(BEIJING)
+        day = at.date() + timedelta(days=1)
+        first = "预定明天下午3点到到5点的二楼会议室，我和罗晨、陈宇、徐佳"
+        people = {"罗晨": "P000007", "陈宇": "P000003", "徐佳": "P000008"}
+        room = {**self.room, "room_id": "R000002", "name": "二楼讨论室"}
+        self.mock_tool.side_effect = [
+            *({"items": [{"person_id": person_id, "name": name}]} for name, person_id in people.items()),
+            {"items": [room]},
+        ]
+        self.responses.extend([
+            {"route": "meeting", "new_request": True, "start_booking": True},
+            {"date_hint": "明天"},
+            {"action": "ask", "message": "会议主题是什么？", "requested_fields": ["subject"]},
+            {"route": "meeting"},
+            {"subject": "径流项目后续开发讨论", "room_name": "二楼会议室", "host": "我", "members": list(people),
+             "start_clock": "15:00:00", "end_clock": "17:00:00"},
+            "",
+        ])
+        await main.reply(first, request_time=at)
+        self.assertEqual(self.agent.workflow.draft.fields["starts_at"], f"{day}T15:00:00+08:00")
+        self.assertEqual(self.agent.workflow.draft.fields["ends_at"], f"{day}T17:00:00+08:00")
+        answer = await main.reply("是的，就我们这些人开会，会议主题是径流项目后续开发讨论", request_time=at)
+        self.assertIn("请核对预订申请", answer)
+        self.assertIn(first, self.requests[-2]["messages"][-1]["content"])
+        self.assertEqual(self.agent.workflow.pending.arguments, {
+            "subject": "径流项目后续开发讨论", "room_id": "R000002", "host_id": "P000001",
+            "starts_at": f"{day}T15:00:00+08:00", "ends_at": f"{day}T17:00:00+08:00",
+            "member_ids": list(people.values()),
+        })
+        self.assertEqual(self.mock_tool.await_args.args[1]["min_capacity"], 4)
+        self.assertEqual(self.mock_tool.await_args.args[1]["name"], "二楼")
+        self.assertFalse(self.saved)
+
+    async def test_unmatched_attendee_can_be_removed_without_losing_room_or_other_people(self) -> None:
+        main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
+        now = datetime.now(BEIJING)
+        day = now.date() + timedelta(days=1)
+        people = {"罗晨": "P000007", "陈宇": "P000003"}
+        room = {**self.room, "room_id": "R000002", "name": "二楼讨论室"}
+
+        async def tool(name, params):
+            if name == "find_people":
+                person = params["name"]
+                return {"items": [{"person_id": people[person], "name": person}] if person in people else []}
+            self.assertEqual(name, "find_available_rooms")
+            self.assertEqual(params["name"], "二楼")
+            self.assertEqual(params["min_capacity"], 3)
+            return {"items": [room]}
+
+        self.mock_tool.side_effect = tool
+        self.responses.extend([
+            {"route": "meeting", "new_request": True, "start_booking": True},
+            {"date_hint": "明天", "host": "我", "members": [*people, "徐佳"], "attendee_count": 4},
+            {"action": "ask", "message": "请补充会议主题。", "requested_fields": ["subject"]},
+            {"route": "meeting"}, {"subject": "径流项目后续开发讨论", "members": []},
+            {"action": "ask", "message": "请核对徐佳的姓名。"},
+            {"route": "meeting"}, {"intent": "continue", "members": [], "member_mode": "replace"}, "",
+        ])
+        await main.reply("预定明天下午3点到到5点的二楼会议室，我和罗晨、陈宇、徐佳", request_time=now)
+        self.assertIn("没有找到「徐佳」", await main.reply("会议主题是径流项目后续开发讨论", request_time=now))
+        answer = await main.reply("那就不要徐佳了", request_time=now)
+        self.assertIn("请核对预订申请", answer)
+        self.assertIn("罗晨、陈宇｜所需座位：3 人", answer)
+        self.assertEqual(self.agent.workflow.pending.arguments, {
+            "subject": "径流项目后续开发讨论", "host_id": "P000001", "room_id": "R000002",
+            "starts_at": f"{day}T15:00:00+08:00", "ends_at": f"{day}T17:00:00+08:00",
+            "member_ids": ["P000007", "P000003"],
+        })
 
     async def test_flexible_search_window_is_not_a_reservation(self) -> None:
         day = datetime.now(BEIJING).date() + timedelta(days=1)

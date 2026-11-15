@@ -7,7 +7,7 @@ from tempfile import NamedTemporaryFile
 
 from pydantic import TypeAdapter
 
-from agent.main import AgentMemory
+from agent.memory import AgentMemory
 
 
 def file_key(value: str) -> str:

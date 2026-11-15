@@ -1,10 +1,9 @@
 # 会议室命令行智能体
 
-在项目根目录用 Conda 的 `py313` 启动 FastAPI 和 MCP，供会议室请求使用。普通聊天只需要 Ollama。
+按[根目录启动说明](../README.md#本地启动)安装依赖。会议室请求需要 FastAPI 和 MCP，纯聊天只需要模型服务。
 
 ```powershell
 conda activate py313
-python -m pip install -r api/requirements.txt -r agent/requirements.txt
 python -X utf8 start_services.py
 ```
 
@@ -56,6 +55,19 @@ python -X utf8 -m agent.main --person-id P000002 --trace
 
 主 Agent 在第一次收到会议请求时连接 MCP。聊天时仍可保留会议草稿，回复「继续申请」可回到会议流程。使用 `--trace` 可以查看分流、输入 token、子 Agent 意图和 MCP 调用结果。各模型请求只携带当前步骤需要的上下文。
 
-命令行的草稿和待核实记录保存在当前进程，退出后会清除。企业微信通过消息回调使用同一套 Agent，状态另存会话文件。 [企业微信对话流程与记忆设计](../wecom/conversation-design.md)
+命令行的草稿和待核实记录保存在当前进程，退出后会清除。企业微信通过消息回调使用同一套 Agent，状态另存会话文件。 [企业微信对话流程与记忆设计](conversation-design.md)
 
-单独检查 Ollama，可运行 `python -X utf8 -m agent.test_qwen --ping`。回归测试可运行 `python -B -m unittest agent.test_workflow api.test_bookings mcp_server.test_stdio -v`。
+## 提示词
+
+运行时提示词集中在 [agent/prompts/](../agent/prompts/)，按模型调用的职责查找。
+
+- **分流和聊天**由 `routing.md` 判断聊天还是会议请求，`chat.md` 生成普通聊天回复，`chat_summary.md` 更新普通聊天摘要。
+- **会议解析**默认使用 `meeting_intent.md`。`booking_create.md` 用于从明确的预订请求提取条件，`booking_follow_up.md` 用于补齐主题和时间，`booking_target.md` 用于从预约候选中确定要操作的记录。
+- **协调和回复**由 `coordination.md` 判断要追问、回答还是请子 Agent 重试解析，`meeting_reply.md` 负责生成面向用户的措辞。
+- **群聊**通过 `group_context.md` 补充群聊范围，通过 `quoted_context.md` 说明如何使用群聊引用。
+
+三个预约提取模板中的 `{now}` 在请求时替换为当前轮收到消息的北京时间。结构化字段见 [workflow_models.py](../agent/workflow_models.py)，确认提交和预约规则见 [workflow.py](../agent/workflow.py)。
+
+## 调试
+
+用 `python -X utf8 -m agent.test_qwen --ping` 单独检查模型接口。用 `python -X utf8 -m unittest agent.test_workflow -v` 运行 Agent 回归测试。

@@ -1,0 +1,18 @@
+# Python 3.13。全量安装：python -m pip install -r requirements.txt
+# 仅安装某一模块时，可按下面的标注选取该模块直接依赖的条目。
+# SQLite 初始化脚本只用标准库。服务联调的依赖是各参与模块的合集。
+
+# 跨模块依赖
+pydantic>=2.9,<3          # API、MCP、Agent、企业微信：模型与参数校验
+tzdata                    # API、MCP、Agent、企业微信：Windows 上的北京时间数据
+uvicorn>=0.32,<1          # API 和 MCP HTTP：ASGI 服务运行器
+httpx>=0.28,<1            # MCP、Agent、企业微信、联合启动器，以及 API 测试
+mcp>=2,<3                 # MCP、Agent、企业微信、联合启动器及 MCP 诊断
+python-dotenv>=1,<2       # Agent、企业微信：读取 .env
+httpx2>=2,<3              # Agent、企业微信：识别 MCP SDK 的传输异常
+jsonschema>=4.20,<5       # Agent、企业微信：校验 MCP 工具参数
+
+# 模块专用依赖
+fastapi>=0.115,<1         # API：HTTP 路由与 OpenAPI
+wecom-aibot-python-sdk==1.0.2  # 企业微信：机器人长连接
+rich                      # mcp_test.py：输出 HTTP 联调结果

@@ -1,12 +1,11 @@
 # 企业微信会议室助手
 
-在项目根目录打开 PowerShell，使用 Conda 的 `py313` 环境安装依赖并启动会议室 API 和 MCP。单聊和群聊使用 Ollama，需要启动 Ollama 并准备 `qwen3.5:4b`，也可按 Agent 文档配置其他模型。
+按[根目录启动说明](../README.md#本地启动)安装依赖，再启动会议室 API 和 MCP。单聊和群聊默认使用 Ollama 的 `qwen3.5:4b`，也可以通过 [Agent 文档](agent.md)配置其他模型。
 
 [查看对话功能、会议请求流程图与记忆设计](conversation-design.md)。
 
 ```powershell
 conda activate py313
-python -m pip install -r wecom/requirements.txt
 python -X utf8 start_services.py
 ```
 

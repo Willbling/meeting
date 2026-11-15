@@ -1,20 +1,20 @@
 import os
 import re
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from api.models import BEIJING
 
-from api.models import BEIJING, ApiDatetime, BookingId, BookingStatus, RoomId
+from .workflow_models import (
+    LABELS, PAGE_SIZE, Application as Application, BookingSearch, Draft, DraftUserMessage, Interpretation as Interpretation,
+    MeetingQuestion as MeetingQuestion, WorkflowIssue as WorkflowIssue, WorkflowMemory as WorkflowMemory,
+    booking_reference,
+)
 
 
-type Intent = Literal["rooms", "bookings", "detail", "create", "reschedule", "cancel"]
 WRITES = {"create": "create_booking", "reschedule": "reschedule_booking", "cancel": "cancel_booking"}
-LABELS = {"create": "预订", "reschedule": "改期", "cancel": "取消"}
 UNCERTAIN = {"API_TIMEOUT", "API_UNAVAILABLE", "API_INVALID_RESPONSE", "API_REQUEST_FAILED", "MCP_CALL_FAILED"}
-PAGE_SIZE = 5
 RELATIVE_DAYS = {"今天": 0, "明天": 1, "后天": 2, "昨天": -1, "前天": -2}
 DAY_PARTS = {"morning": ("08:00", "12:00"), "afternoon": ("13:00", "18:00"), "evening": ("18:00", "22:00")}
 
@@ -29,32 +29,17 @@ def whole_day(hint: str, today: date) -> dict[str, str]:
     return {"starts_at": start.isoformat(timespec="seconds"), "ends_at": end.isoformat(timespec="seconds")}
 
 
-@dataclass(frozen=True)
-class WorkflowIssue:
-    reason: str
-    needed: tuple[str, ...]
-    suggestion: str
-
-
-@dataclass(frozen=True)
-class MeetingQuestion:
-    text: str
-    fields: tuple[str, ...]
-
-
-@dataclass
-class BookingSearch:
-    scope: dict
-    items: list[dict]
-    complete: bool
-
-    def context(self) -> dict:
-        return {"scope": self.scope, "candidates": [booking_reference(item) for item in self.items],
-                "complete": self.complete}
-
-
-def booking_reference(item: dict) -> dict:
-    return {key: item[key] for key in ("booking_id", "subject", "starts_at", "ends_at", "room_name", "status")}
+def day_part_window(day: date, part: str) -> dict[str, str]:
+    defaults = DAY_PARTS[part]
+    try:
+        start, end = os.getenv(f"MEETING_{part.upper()}_HOURS", "-".join(defaults)).split("-", maxsplit=1)
+        times = [time.fromisoformat(value) for value in (start, end)]
+        if any(value.tzinfo or value.microsecond for value in times) or times[0] >= times[1]:
+            raise ValueError("Invalid configured day part")
+    except ValueError:
+        times = [time.fromisoformat(value) for value in defaults]
+    return {key: datetime.combine(day, value, BEIJING).isoformat(timespec="seconds")
+            for key, value in zip(("starts_at", "ends_at"), times)}
 
 
 def subject_matches(subject: str, clue: str) -> bool:
@@ -62,86 +47,6 @@ def subject_matches(subject: str, clue: str) -> bool:
         return True
     words = [word for word in re.split(r"[的\s、，]+", clue.casefold()) if word]
     return len(words) > 1 and all(len(word) >= 2 and word in subject.casefold() for word in words)
-
-
-class Interpretation(BaseModel):
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-
-    intent: Literal[
-        "rooms", "bookings", "detail", "create", "reschedule", "cancel", "continue",
-        "confirm", "booking_status", "help", "unknown",
-    ]
-    starts_at: ApiDatetime | None = None
-    ends_at: ApiDatetime | None = None
-    target_start: ApiDatetime | None = None
-    target_end: ApiDatetime | None = None
-    booking_id: BookingId | None = None
-    target_subject: str | None = None
-    target_date_hint: str | None = None
-    use_booking_search: bool = False
-    status: BookingStatus | None = None
-    subject: str | None = None
-    content: str | None = None
-    host: str | None = None
-    members: list[str] | None = None
-    capacity: int | None = Field(default=None, ge=1, le=2**63 - 1)
-    duration_minutes: int | None = Field(default=None, ge=1, le=10080)
-    day_part: Literal["morning", "afternoon", "evening"] | None = None
-    flexible: bool | None = None
-    attendee_count: int | None = Field(default=None, ge=1, le=10000)
-    member_mode: Literal["replace", "add", "remove"] | None = None
-    clear_content: bool | None = None
-    recent_booking: bool = False
-    room_id: RoomId | None = None
-    room_name: str | None = None
-    any_room: bool | None = None
-    selection: int | None = Field(default=None, ge=1, le=PAGE_SIZE)
-    date_hint: str | None = None
-    date_reference: str | None = None
-    keep_original_time: bool | None = None
-    room_info: bool = False
-
-
-@dataclass
-class Draft:
-    intent: Intent
-    fields: dict = field(default_factory=dict)
-    choices: list[dict] = field(default_factory=list)
-    choice_kind: str = ""
-    resolved_people: dict[str, dict] = field(default_factory=dict)
-    attendee_source: str | None = None
-
-
-@dataclass
-class Application:
-    intent: Intent
-    arguments: dict
-    summary: str
-    original: dict | None = None
-    known_ids: frozenset[str] = frozenset()
-
-
-@dataclass
-class WorkflowMemory:
-    draft: Draft | None = None
-    query: Draft | None = None
-    pending: Application | None = None
-    uncertain: Application | None = None
-    last_booking: str | None = None
-    last_written_booking: str | None = None
-    booking_search: BookingSearch | None = None
-    question: MeetingQuestion | None = None
-
-    def step(self) -> str | None:
-        if self.uncertain:
-            return "待核实提交结果"
-        if self.pending:
-            return f"{LABELS[self.pending.intent]}待确认"
-        if self.draft:
-            if self.draft.choice_kind == "room":
-                return f"{LABELS[self.draft.intent]}待选会议室"
-            return f"{LABELS[self.draft.intent]}草稿待补充"
-        return "有近期提交记录" if self.last_written_booking else None
 
 
 def window(item: dict) -> str:
@@ -178,15 +83,18 @@ class BookingWorkflow(WorkflowMemory):
         self.issue = WorkflowIssue(reason, needed, suggestion)
         return fallback
 
-    def context(self) -> dict:
+    def context(self, *, include_draft_messages: bool = True) -> dict:
         def compact(draft: Draft | None) -> dict | None:
             if draft is None:
                 return None
             choices = [{key: item[key] for key in (
                 "booking_id", "room_id", "name", "job_title", "job_level", "subject", "starts_at", "room_name",
             ) if key in item} for item in draft.choices]
-            return {"intent": draft.intent, "fields": draft.fields, "choice_kind": draft.choice_kind,
-                    "choices": choices, "attendee_source": draft.attendee_source}
+            result = {"intent": draft.intent, "fields": draft.fields, "choice_kind": draft.choice_kind,
+                      "choices": choices, "attendee_source": draft.attendee_source}
+            if draft is self.draft and include_draft_messages and draft.user_messages:
+                result["user_messages"] = [asdict(message) for message in draft.user_messages]
+            return result
 
         return {"draft": compact(self.draft), "query": compact(self.query), "booking_step": self.step(),
                 "waiting_for_confirmation": self.pending.intent if self.pending else None,
@@ -207,7 +115,10 @@ class BookingWorkflow(WorkflowMemory):
         more = "\n还有其他候选，可以补充条件缩小范围。" if len(items) > PAGE_SIZE else ""
         return f"{question}\n{choices}{more}"
 
-    async def apply(self, meaning: Interpretation, *, resume_write: bool = False, attendee_source: str | None = None) -> str:
+    async def apply(
+        self, meaning: Interpretation, *, resume_write: bool = False, attendee_source: str | None = None,
+        user_message: DraftUserMessage | None = None, new_request: bool = False,
+    ) -> str:
         intent = meaning.intent
         if intent == "help":
             return "可以查空闲会议室、查我的预约，也可以帮你预订、改期或取消。比如「明天 14:00 到 15:00，查能坐 8 人的会议室」。"
@@ -221,7 +132,7 @@ class BookingWorkflow(WorkflowMemory):
             intent = draft.intent
         elif intent in WRITES:
             self.pending = None
-            if self.draft is None or self.draft.intent != intent:
+            if new_request or self.draft is None or self.draft.intent != intent:
                 self.draft = Draft(intent)
                 if intent == "create" and self.query and self.query.intent == "rooms":
                     search = self.query.fields
@@ -262,7 +173,8 @@ class BookingWorkflow(WorkflowMemory):
             self.pending = None
         updates = meaning.model_dump(mode="json", exclude_none=True,
                                      exclude={"intent", "selection", "room_info", "recent_booking",
-                                              "target_date_hint", "use_booking_search", "date_reference"})
+                                              "target_date_hint", "use_booking_search", "date_reference",
+                                              "start_clock", "end_clock"})
         if intent in ("reschedule", "cancel"):
             if meaning.target_date_hint:
                 bounds = whole_day(meaning.target_date_hint, datetime.now(BEIJING).date())
@@ -345,7 +257,23 @@ class BookingWorkflow(WorkflowMemory):
                         choice["person_id"] if member == choice["query"] else member
                         for member in fields["members"]
                     ])
+        if intent == "create":
+            fields.pop("member_mode", None)
+            member_mode = updates.pop("member_mode", None)
+            if "members" in updates:
+                old_members, names = fields.get("members", []), updates["members"]
+                if member_mode == "remove":
+                    updates["members"] = [name for name in old_members if name not in names]
+                elif member_mode == "add":
+                    updates["members"] = list(dict.fromkeys([*old_members, *names]))
+                elif old_members and not names and member_mode != "replace":
+                    # The model sometimes emits an empty list for an unrelated or partial update.
+                    updates.pop("members")
+                if member_mode in {"add", "remove"} and "attendee_count" in fields and "attendee_count" not in updates:
+                    updates["attendee_count"] = max(1, fields["attendee_count"] + len(updates["members"]) - len(old_members))
         fields.update(updates)
+        if user_message and intent in WRITES and draft is self.draft:
+            draft.remember_user_message(user_message)
         if attendee_source and intent == "create":
             draft.attendee_source = attendee_source
         draft.choices = []
@@ -407,18 +335,9 @@ class BookingWorkflow(WorkflowMemory):
         if fields.get("day_part") and fields.get("date_hint") and not (fields.get("starts_at") and fields.get("ends_at")):
             bounds = whole_day(fields["date_hint"], datetime.now(BEIJING).date())
             if bounds:
-                part = fields["day_part"]
-                defaults = DAY_PARTS[part]
-                try:
-                    start, end = os.getenv(f"MEETING_{part.upper()}_HOURS", "-".join(defaults)).split("-", maxsplit=1)
-                    times = [time.fromisoformat(value) for value in (start, end)]
-                    if any(value.tzinfo or value.microsecond for value in times) or times[0] >= times[1]:
-                        raise ValueError("Invalid configured day part")
-                except ValueError:
-                    times = [time.fromisoformat(value) for value in defaults]
                 day = datetime.fromisoformat(bounds["starts_at"]).date()
-                for key, value in zip(("starts_at", "ends_at"), times):
-                    fields.setdefault(key, datetime.combine(day, value, BEIJING).isoformat(timespec="seconds"))
+                for key, value in day_part_window(day, fields["day_part"]).items():
+                    fields.setdefault(key, value)
                 fields["flexible"] = True
         if not fields.get("starts_at") or not fields.get("ends_at"):
             date = fields.get("date_hint", "")
@@ -458,8 +377,15 @@ class BookingWorkflow(WorkflowMemory):
         if not items:
             if day:
                 return f"{day} 没有查到你创建、主持或参加的预约。"
+            if fields.get("starts_at") and fields.get("ends_at"):
+                return f"{window(fields)}没有查到你创建、主持或参加的预约。"
             return "这个范围内没有查到你的预约。" if filtered else "你目前没有待开始的预约。"
-        title = f"{day} 的会议室安排：" if day else ("查到这些预约：" if filtered else "你待开始的预约：")
+        if day:
+            title = f"{day} 的会议室安排："
+        elif fields.get("starts_at") and fields.get("ends_at"):
+            title = f"{window(fields)}的会议室安排："
+        else:
+            title = "查到这些预约：" if filtered else "你待开始的预约："
         return self.choose(draft, "booking", items, booking_line, title)
 
     async def search_bookings(self, fields: dict, *, subject: str | None, status: str | None,

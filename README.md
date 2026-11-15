@@ -1,32 +1,108 @@
-# 会议室预订系统
+# 会议室智能助手
 
-项目使用 Conda `py313`。SQLite 存储人员、会议室和预约，FastAPI 提供业务接口，MCP 提供工具。命令行、企业微信单聊和群聊共用 Ollama Agent。企业微信群聊支持普通聊天和查空闲会议室。
+命令行和企业微信共用同一套 Agent。主 Agent 判断话题，会议子 Agent 解析会议请求，由预约流程调用 MCP 工具。MCP 将查询和写入转给 FastAPI，业务数据保存在 SQLite。企业微信还负责单聊身份绑定、群聊范围和会话记忆。
 
 ## 本地启动
 
-在项目根目录用 PowerShell 安装依赖并一键启动 FastAPI 和 MCP。
+在项目根目录打开 PowerShell，使用 Python 3.13。项目使用 Conda 的 `py313` 环境。
 
 ```powershell
 conda activate py313
-python -m pip install -r api/requirements.txt -r mcp_server/requirements.txt
+python -m pip install -r requirements.txt
 python -X utf8 start_services.py
 ```
 
-启动器在数据库文件缺失时创建样例库，等 FastAPI 和数据库通过就绪检查后启动 MCP，再通过 MCP 客户端确认工具列表。默认 API 地址为 `http://127.0.0.1:8000/docs`，MCP 地址为 `http://127.0.0.1:8001/mcp`。按 Ctrl+C 停止两个服务。
+[requirements.txt](requirements.txt) 标明每项依赖由哪些模块使用。启动器在数据库文件缺失时初始化样例库，依次检查 API 和 MCP 是否就绪。API 调试页为 [127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)，MCP 默认监听 `http://127.0.0.1:8001/mcp`。按 Ctrl+C 停止两个服务。
 
-修改 [services.toml](services.toml) 可以设置 `api.port`、`api.database`、`mcp.port` 和每个服务的就绪等待时间 `startup.timeout_seconds`。数据库相对路径以配置文件所在目录为基准。用 `python -X utf8 start_services.py --config 路径.toml` 指定其他配置。
+运行 Agent 前先启动 Ollama 并准备默认模型 `qwen3.5:4b`，或配置兼容 Chat Completions 的模型服务。启动企业微信前，把 [.env.example](.env.example) 复制为本地 `.env`，填写机器人凭据。在另一个终端执行对应命令。
 
-如需启动 Agent 或企业微信，再分别安装 `agent/requirements.txt` 或 `wecom/requirements.txt`，按下方对应说明启动。如果修改了端口，命令行以及企业微信单聊和群聊使用 `MEETING_MCP_URL` 指向新 MCP 地址。企业微信的 `MEETING_DB_PATH` 也要指向 API 使用的数据库。
+```powershell
+python -X utf8 -m agent.main
+python -X utf8 -m wecom.main --reset-memory true
+```
 
-`services.toml` 的 `testing.person_id` 供 MCP 启动探测，并作为命令行 Agent 的本地测试默认值。企业微信单聊使用当前发送者的本地绑定。
+企业微信示例命令会保留现有会话记忆。省略 `--reset-memory` 时启动会清空旧记忆。账号绑定、群聊范围和记忆存放位置见[企业微信使用说明](docs/wecom.md)。
 
-首次配置时，将 `.env.example` 复制为本地 `.env`，按需填写企业微信凭据。Git 跟踪样例配置、建表 SQL 和样例数据 SQL。本地 `.env`、SQLite 数据库文件及其中的账号绑定留在工作目录。
+修改 [services.toml](services.toml) 可设置 API 和 MCP 端口、数据库路径、测试人员及就绪超时，数据库相对路径以该配置文件所在目录为基准。使用 `python -X utf8 start_services.py --config 路径.toml` 可指定其他配置。改了 MCP 端口时，为 CLI 和企业微信设置 `MEETING_MCP_URL`。改了数据库路径时，为企业微信设置 `MEETING_DB_PATH`，供机器人和绑定命令使用。
 
-## 使用说明
+`testing.person_id` 用于 MCP 启动探测，也是命令行 Agent 的默认测试身份。企业微信单聊使用当前发送者绑定的人员编号。
 
-- [SQLite 数据与初始化](data/sqlite/README.md)
-- [FastAPI 接口](api/README.md)
-- [MCP 服务与测试](mcp_server/README.md)
-- [命令行智能体与 Ollama 联调](agent/README.md)
-- [企业微信长连接、账号绑定及群聊](wecom/README.md)
-- [企业微信对话功能、会议请求流程图与记忆设计](wecom/conversation-design.md)
+## 项目结构
+
+```text
+meeting/
+├── agent/                       # 命令行和企业微信共用的 Agent
+│   ├── main.py                  # 命令行入口和参数
+│   ├── factory.py               # 读取模型配置、创建 Agent、管理共享连接
+│   ├── mcp_connection.py        # MCP 客户端的连接生命周期
+│   ├── model.py                 # Chat Completions 客户端和结构化输出
+│   ├── conversation.py          # 主 Agent：分流、聊天、协调、回复
+│   ├── meeting.py               # 会议子 Agent：意图解析和工具调用
+│   ├── workflow.py              # 查房、查预约、预约草稿、确认提交和核实
+│   ├── workflow_models.py       # 会议意图、草稿、候选和流程状态
+│   ├── memory.py                # 会话快照和历史消息格式
+│   ├── prompt_loader.py         # 按文件名加载提示词
+│   ├── prompts/                 # 按调用场景组织的提示词模板
+│   ├── test_qwen.py             # 模型联调入口
+│   └── test_workflow.py         # 多轮对话和预约流程回归测试
+├── api/                         # FastAPI 业务接口
+│   ├── main.py                  # 创建应用、注册路由和异常处理
+│   ├── routes.py                # 就绪、人员、会议室和预约接口
+│   ├── dependencies.py          # 数据库连接、操作者身份和时间参数校验
+│   ├── models.py                # HTTP 请求和响应数据模型
+│   ├── store.py                 # SQLite 查询、事务和预约规则
+│   └── test_bookings.py         # 预约权限、并发和生命周期测试
+├── mcp_server/                  # 将会议工具请求转为 FastAPI 调用
+│   ├── server.py                # 创建服务、注册工具、启动 HTTP 或 stdio
+│   ├── client.py                # API 客户端、响应校验和错误转换
+│   ├── tools/
+│   │   ├── directory.py        # 人员查询和空闲会议室查询
+│   │   ├── bookings.py         # 预约列表、详情、新建、改期和取消
+│   │   └── common.py           # 共享参数类型和工具响应结构
+│   └── test_stdio.py            # MCP stdio 和 API 联调测试
+├── wecom/                       # 企业微信渠道
+│   ├── main.py                  # 启动配置和账号绑定命令
+│   ├── bot.py                   # 长连接、消息去重、会话串行和流式回复
+│   ├── messages.py              # 单聊、群聊和引用消息的处理
+│   ├── identity.py              # 查询和更新企业微信账号绑定
+│   ├── memory.py                # 会话记忆文件的加载、保存和清空
+│   └── test_identity.py         # 身份、记忆和多轮交互测试
+├── data/
+│   ├── sqlite/
+│   │   ├── init_db.py          # 初始化 SQLite
+│   │   ├── schema.sql          # 表、视图、索引和触发器
+│   │   └── seed.sql            # 样例人员、会议室和预约
+│   └── wecom_memory/           # 机器人运行后生成的本地对话记忆
+├── docs/                        # 模块说明、操作指南和对话设计
+├── .env.example                 # 模型和机器人配置样例
+├── requirements.txt             # Python 依赖及所属模块
+├── services.toml                # 本地端口、数据库路径和测试身份
+├── service_config.py            # 测试身份配置读取与校验
+├── start_services.py            # 初始化数据库并启动 API 和 MCP
+├── mcp_test.py                  # MCP HTTP 联调入口
+└── README.md
+```
+
+## 文档
+
+- [命令行 Agent、模型配置与提示词](docs/agent.md)
+- [企业微信启动、绑定、群聊与记忆](docs/wecom.md)
+- [对话设计、会议业务流程和主子 Agent 的交接](docs/conversation-design.md)
+- [FastAPI 接口及业务约束](docs/api.md)
+- [MCP 工具与联调](docs/mcp.md)
+- [SQLite 初始化、表结构与样例查询](docs/sqlite.md)
+
+## 验证
+
+在项目根目录运行回归测试。测试使用临时数据库和模拟模型响应。
+
+```powershell
+python -X utf8 -m unittest discover -v
+```
+
+模型和 HTTP 工具可分别联调。第二条命令需要先启动 API 和 MCP。
+
+```powershell
+python -X utf8 -m agent.test_qwen --ping
+python -X utf8 mcp_test.py
+```

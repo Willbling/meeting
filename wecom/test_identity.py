@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from agent.main import AgentMemory, MainAgent, MeetingAgent, ModelMessage
 from agent.workflow import Application, Interpretation, WorkflowMemory
+from agent.workflow_models import Draft, MeetingQuestion
 from api.models import BEIJING
 from data.sqlite.init_db import initialize
 from mcp_server.client import result
@@ -167,6 +168,81 @@ class WeComIdentityTest(unittest.IsolatedAsyncioTestCase):
         snapshot = memory.load(path, "P000001").workflow
         self.assertIsNone(snapshot.uncertain)
         self.assertEqual(snapshot.last_written_booking, "A000009")
+
+    async def test_subject_reply_recovers_from_empty_booking_extraction(self) -> None:
+        user = "ZhangYueHui"
+        now = datetime.now(BEIJING)
+        day = now.date() + timedelta(days=1)
+        path = self.memory_dir / "single" / f"{memory.file_key(user)}.txt"
+        fields = {"date_hint": str(day), "starts_at": f"{day}T15:00:00+08:00", "ends_at": f"{day}T17:00:00+08:00",
+                  "room_name": "二楼", "members": ["罗晨", "陈宇", "徐佳"]}
+        memory.save(path, "P000001", AgentMemory(last_route="meeting", workflow=WorkflowMemory(
+            draft=Draft("create", fields=fields),
+            question=MeetingQuestion("还需要会议主题。可以直接回复补充。", ("subject",)),
+        )))
+        self.responses.extend([
+            {"route": "meeting"}, {"subject": None}, {"subject": "径流项目后续开发讨论"}, "",
+        ])
+        room = {"room_id": "R000002", "name": "二楼讨论室", "address": "205", "capacity": 6}
+        self.tool.side_effect = [
+            *(result({"items": [{"person_id": f"P00000{idx}", "name": name}]})
+              for idx, name in enumerate(fields["members"], 2)),
+            result({"items": [room]}),
+        ]
+
+        reply = await self.send(user, "会议主题是径流项目后续开发讨论", at=now)
+        self.assertIn("请核对预订申请", reply)
+        draft = memory.load(path, "P000001").workflow
+        self.assertEqual(draft.pending.arguments, {
+            "subject": "径流项目后续开发讨论", "starts_at": fields["starts_at"], "ends_at": fields["ends_at"],
+            "host_id": "P000001", "member_ids": ["P000002", "P000003", "P000004"], "room_id": "R000002",
+        })
+        self.assertEqual([call.args[0] for call in self.tool.await_args_list],
+                         ["find_people"] * 3 + ["find_available_rooms"])
+
+    async def test_draft_user_messages_survive_chat_and_recent_history_rollover(self) -> None:
+        user = "ZhangYueHui"
+        first = "明天帮我订会议室，我和陈宇开会"
+        at = datetime(2026, 11, 15, 11, 30, tzinfo=BEIJING)
+        path = self.memory_dir / "single" / f"{memory.file_key(user)}.txt"
+        self.responses.extend([
+            {"route": "meeting", "start_booking": True}, {"date_hint": "明天"},
+            {"action": "ask", "message": "请告诉我会议主题。", "requested_fields": ["subject"]},
+            {"route": "chat"}, "你好！",
+            *({"route": "meeting", "new_request": True}, "") * 3,
+            {"route": "meeting"}, {"intent": "create", "subject": "项目评审", "members": ["陈宇"]},
+            {"action": "ask", "message": "几点开会？"},
+            {"route": "meeting", "start_booking": True}, {"subject": "另一笔预约"},
+            {"action": "ask", "message": "这场会几点？"},
+            {"route": "meeting"}, "",
+        ])
+        await self.send(user, first, at=at)
+        await self.send(user, "你好", at=at + timedelta(minutes=1))
+        for minutes in range(2, 5):
+            await self.send(user, "查我的预约", at=at + timedelta(minutes=minutes))
+
+        saved = memory.load(path, "P000001")
+        self.assertEqual([turn.user for turn in saved.meeting_history], ["查我的预约"] * 3)
+        opening, = saved.workflow.draft.user_messages
+        self.assertEqual((opening.text, opening.at), (first, at.isoformat()))
+        request_index = len(self.requests)
+
+        follow_up = "继续刚才的预订，主题是项目评审，还是原来这些人"
+        await self.send(user, follow_up, at=at + timedelta(minutes=5))
+        model_input = self.requests[request_index + 1][-1]["content"]
+        self.assertIn(first, model_input)
+        self.assertIn(at.isoformat(), model_input)
+        saved = memory.load(path, "P000001")
+        self.assertEqual(saved.workflow.draft.fields["members"], ["陈宇"])
+        self.assertEqual([message.text for message in saved.workflow.draft.user_messages], [first, follow_up])
+
+        new_booking = "另外帮我订一场，主题是另一笔预约"
+        await self.send(user, new_booking, at=at + timedelta(minutes=6))
+        saved = memory.load(path, "P000001")
+        self.assertEqual([message.text for message in saved.workflow.draft.user_messages], [new_booking])
+        self.assertNotIn("members", saved.workflow.draft.fields)
+        await self.send(user, "放弃申请", at=at + timedelta(minutes=7))
+        self.assertIsNone(memory.load(path, "P000001").workflow.draft)
 
     def test_reset_and_typed_memory(self) -> None:
         path = self.memory_dir / "single" / f"{memory.file_key('id')}.txt"
