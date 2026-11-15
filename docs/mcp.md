@@ -7,21 +7,19 @@
 推荐使用[一键启动脚本](../README.md#本地启动)。也可以单独启动。安装根目录依赖后，先按 [API 文档](api.md)初始化数据库，再在项目根目录启动 API。
 
 ```powershell
-conda activate py313
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+uv run python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
 保持 API 运行，在另一个 PowerShell 窗口从项目根目录启动 MCP。
 
 ```powershell
-conda activate py313
 $env:MEETING_API_URL = 'http://127.0.0.1:8000'
-python -X utf8 -m mcp_server.server --port 8001
+uv run python -X utf8 -m mcp_server.server --port 8001
 ```
 
 客户端连接 `http://127.0.0.1:8001/mcp`。启动时 MCP 用 `services.toml` 中的 `testing.person_id` 向 API 发起一次只读预约查询，验证 HTTP 连通和测试身份有效性。配置文件可通过 `--config` 指定。
 
-预约及人员工具使用当次 MCP 请求的 `params._meta["meeting/person-id"]`。Agent 在程序侧填入操作者，API 负责预约权限校验。群聊使用的 `find_available_rooms` 支持无身份查询，返回房间信息和占用时段。HTTP 服务监听 `127.0.0.1`，人员编号由受信任的本机调用方传入。运行中 API 掉线时工具返回结构化错误，API 恢复后可以继续调用。本地 stdio 调试入口为 `python -X utf8 -m mcp_server.server --transport stdio`。
+预约及人员工具使用当次 MCP 请求的 `params._meta["meeting/person-id"]`。Agent 在程序侧填入操作者，API 负责预约权限校验。群聊使用的 `find_available_rooms` 支持无身份查询，返回房间信息和占用时段。HTTP 服务监听 `127.0.0.1`，人员编号由受信任的本机调用方传入。运行中 API 掉线时工具返回结构化错误，API 恢复后可以继续调用。本地 stdio 调试入口为 `uv run python -X utf8 -m mcp_server.server --transport stdio`。
 
 ## 工具
 
@@ -37,10 +35,10 @@ python -X utf8 -m mcp_server.server --port 8001
 
 ## 联调测试
 
-服务运行时，用 `python -X utf8 mcp_test.py` 检查 HTTP 工具发现和 API 查询。修改过 MCP 端口时，先设置 `MEETING_MCP_URL`。
+服务运行时，用 `uv run python -X utf8 mcp_test.py` 检查 HTTP 工具发现和 API 查询。修改过 MCP 端口时，先设置 `MEETING_MCP_URL`。
 
 下面的回归测试使用回环端口、临时 SQLite 和 stdio 子进程。
 
 ```powershell
-python -B -m unittest api.test_bookings mcp_server.test_stdio -v
+uv run python -B -m unittest api.test_bookings mcp_server.test_stdio -v
 ```

@@ -1,25 +1,23 @@
 # 会议室命令行智能体
 
-按[根目录启动说明](../README.md#本地启动)安装依赖。会议室请求需要 FastAPI 和 MCP，纯聊天只需要模型服务。
+按[首次创建环境](../README.md#首次创建环境)安装依赖。会议室请求需要 FastAPI 和 MCP，纯聊天只需要模型服务。
 
 ```powershell
-conda activate py313
-python -X utf8 start_services.py
+uv run python -X utf8 start_services.py
 ```
 
 保持 Ollama 运行，并确保 `ollama list` 中有 `qwen3.5:4b`。在另一个终端进入同一项目目录。
 
 ```powershell
-conda activate py313
-python -X utf8 -m agent.main
+uv run python -X utf8 -m agent.main
 # 单次只读查询与调用诊断
-python -X utf8 -m agent.main --trace "查 A000002"
+uv run python -X utf8 -m agent.main --trace "查 A000002"
 ```
 
 默认使用 `qwen3.5:4b`、`http://localhost:11434` 和 `http://127.0.0.1:8001/mcp`。`OLLAMA_API_BASE`、`MEETING_MODEL` 可写进项目的 `.env` 或由环境变量覆盖。自定义 MCP 地址时设置 `MEETING_MCP_URL`。命令行 Agent 默认使用 `services.toml` 中的 `testing.person_id`，可用 `--config` 读取其他配置文件。用下面的命令可以为当前命令行会话指定其他测试身份，无需重启 MCP。兼容 Chat Completions 的服务可用 `MEETING_LLM_BASE_URL` 和 `MEETING_LLM_API_KEY` 配置，模型服务需要支持 JSON Schema 输出。
 
 ```powershell
-python -X utf8 -m agent.main --person-id P000002 --trace
+uv run python -X utf8 -m agent.main --person-id P000002 --trace
 ```
 
 ## 对话示例
@@ -70,4 +68,4 @@ python -X utf8 -m agent.main --person-id P000002 --trace
 
 ## 调试
 
-用 `python -X utf8 -m agent.test_qwen --ping` 单独检查模型接口。用 `python -X utf8 -m unittest agent.test_workflow -v` 运行 Agent 回归测试。
+用 `uv run python -X utf8 -m agent.test_qwen --ping` 单独检查模型接口。用 `uv run python -X utf8 -m unittest agent.test_workflow -v` 运行 Agent 回归测试。

@@ -1,11 +1,10 @@
 # 会议室预订 API
 
-按[根目录启动说明](../README.md#本地启动)安装依赖。从项目根目录初始化 SQLite 并单独启动 API。
+按[首次创建环境](../README.md#首次创建环境)安装依赖。从项目根目录初始化 SQLite 并单独启动 API。
 
 ```powershell
-conda activate py313
-python data/sqlite/init_db.py
-python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
+uv run python data/sqlite/init_db.py
+uv run python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 ```
 
 打开 [交互式接口文档](http://127.0.0.1:8000/docs) 调试。默认连接 `data/sqlite/meeting.db`，可以用 `MEETING_DB_PATH` 指定另一个已初始化的 SQLite 文件。
@@ -35,5 +34,5 @@ python -m uvicorn api.main:app --host 127.0.0.1 --port 8000
 测试会初始化临时 SQLite 文件，覆盖代订、主持人改期、创建人取消、原时段重新预订和并发冲突。
 
 ```powershell
-python -B -m unittest api.test_bookings -v
+uv run python -B -m unittest api.test_bookings -v
 ```

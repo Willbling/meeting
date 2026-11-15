@@ -1,27 +1,26 @@
 # 企业微信会议室助手
 
-按[根目录启动说明](../README.md#本地启动)安装依赖，再启动会议室 API 和 MCP。单聊和群聊默认使用 Ollama 的 `qwen3.5:4b`，也可以通过 [Agent 文档](agent.md)配置其他模型。
+先按[首次创建环境](../README.md#首次创建环境)安装依赖，再按[本地启动](../README.md#本地启动)准备模型服务和企业微信凭据。下面的命令都从项目根目录运行。
 
 [查看对话功能、会议请求流程图与记忆设计](conversation-design.md)。
 
 ```powershell
-conda activate py313
-python -X utf8 start_services.py
+uv run python -X utf8 start_services.py
 ```
 
-在另一个已激活 `py313` 的 PowerShell 窗口，从同一目录启动机器人。
+在另一个 PowerShell 窗口，从同一目录启动机器人。
 
 ```powershell
-python -X utf8 -m wecom.main
+uv run python -X utf8 -m wecom.main --reset-memory true
 ```
 
 机器人读取项目根目录 `.env` 中的 `WECOM_BOT_ID` 和 `WECOM_BOT_SECRET`。终端显示「企业微信已认证」后，保持该窗口运行。
 
 1. 单聊「会议室助手」，发送 `我的账号` 获取企业微信 UserID。
-2. 如果助手提示账号未绑定，联系管理员将 UserID 绑定到会议室数据库中的人员。管理员可以在另一个已激活 `py313` 的 PowerShell 窗口执行下面的命令，将示例人员编号替换为对应员工的编号。
+2. 如果助手提示账号未绑定，联系管理员将 UserID 绑定到会议室数据库中的人员。管理员可以在另一个 PowerShell 窗口从项目根目录执行下面的命令，将示例人员编号替换为对应员工的编号。
 
 ```powershell
-python -X utf8 -m wecom.main --bind P000001 "替换成刚收到的UserID"
+uv run python -X utf8 -m wecom.main --bind P000001 "替换成刚收到的UserID"
 ```
 
 3. 回到单聊，发送「看看我明天的会议安排」，再追问「今天呢」。可以继续用自然语言查询、预订、改期、编辑或取消。写入操作仍需确认。
@@ -41,7 +40,7 @@ python -X utf8 -m wecom.main --bind P000001 "替换成刚收到的UserID"
 机器人收到新消息后读取对应文件，回复时更新文件。默认启动和显式传入 `--reset-memory false` 都会清空旧记忆。可用 `--memory-dir` 选择其他目录。需要保留旧记忆时，先停止正在运行的机器人，再传入 `true`：
 
 ```powershell
-python -X utf8 -m wecom.main --reset-memory true
+uv run python -X utf8 -m wecom.main --reset-memory true
 ```
 
 清空记忆只会删除该目录中机器人生成的对话记忆文件。已提交的预约和账号绑定仍可在数据库中查询。使用默认目录时，记忆文件由 Git 忽略。

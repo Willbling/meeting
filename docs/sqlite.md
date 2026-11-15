@@ -9,17 +9,16 @@
 
 ## 创建和使用数据库
 
-在项目根目录打开 PowerShell，使用 Conda 的 `py313` 环境。建库使用 Python 标准库 `sqlite3`，无需另外安装 SQLite 命令行工具。
+按[首次创建环境](../README.md#首次创建环境)创建虚拟环境，然后在项目根目录打开 PowerShell。建库使用 Python 标准库 `sqlite3`，无需另外安装 SQLite 命令行工具。
 
 ```powershell
-conda activate py313
-python data/sqlite/init_db.py
+uv run python data/sqlite/init_db.py
 ```
 
 默认输出到 `data/sqlite/meeting.db`。如果该库已经初始化，脚本会提示「已初始化」并跳过。需要单独建一份样例库时，用 `--database` 指定一个新文件名。目标文件的父目录须已存在。
 
 ```powershell
-python data/sqlite/init_db.py --database data/sqlite/meeting_fresh.db
+uv run python data/sqlite/init_db.py --database data/sqlite/meeting_fresh.db
 ```
 
 可以在 SQLite 客户端打开生成的文件，使用下面的样例 SQL 查看数据。FastAPI 和企业微信程序默认读取 `meeting.db`。使用其他文件时，在两个程序各自的启动终端设置相同的绝对路径，例如 `$env:MEETING_DB_PATH = (Resolve-Path data/sqlite/meeting_fresh.db).Path`。

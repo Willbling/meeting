@@ -1,29 +1,55 @@
 # 会议室智能助手
 
+这是一个支持企业微信和命令行的会议室预约助手。用自然语言就能查询会议安排和空闲会议室，也可以预订、改期或取消预约。助手会在多轮对话中补齐时间、会议室和参会人员等信息，并在你确认后提交。企业微信群里可以直接 @ 助手查房。
+
 命令行和企业微信共用同一套 Agent。主 Agent 判断话题，会议子 Agent 解析会议请求，由预约流程调用 MCP 工具。MCP 将查询和写入转给 FastAPI，业务数据保存在 SQLite。企业微信还负责单聊身份绑定、群聊范围和会话记忆。
+
+## 首次创建环境
+
+首次使用时，安装 uv，然后在项目根目录打开 PowerShell，执行以下两条命令。环境和依赖准备好后，日常启动可以直接使用下一节的命令。
+
+```powershell
+uv venv --python 3.13 --managed-python .venv
+uv pip install --python .venv\Scripts\python.exe -r requirements.txt
+```
 
 ## 本地启动
 
-在项目根目录打开 PowerShell，使用 Python 3.13。项目使用 Conda 的 `py313` 环境。
+以下命令都从项目根目录运行。`uv run` 会自动使用项目的 `.venv`。
+
+### 1. 在第一个终端启动 API 和 MCP
 
 ```powershell
-conda activate py313
-python -m pip install -r requirements.txt
-python -X utf8 start_services.py
+uv run python -X utf8 start_services.py
 ```
 
-[requirements.txt](requirements.txt) 标明每项依赖由哪些模块使用。启动器在数据库文件缺失时初始化样例库，依次检查 API 和 MCP 是否就绪。API 调试页为 [127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)，MCP 默认监听 `http://127.0.0.1:8001/mcp`。按 Ctrl+C 停止两个服务。
+看到「服务已就绪」后，保持这个终端运行。脚本会在数据库文件缺失时初始化样例库，并依次启动 FastAPI 和 MCP。API 调试页为 [127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)，MCP 默认地址为 `http://127.0.0.1:8001/mcp`。
 
-运行 Agent 前先启动 Ollama 并准备默认模型 `qwen3.5:4b`，或配置兼容 Chat Completions 的模型服务。启动企业微信前，把 [.env.example](.env.example) 复制为本地 `.env`，填写机器人凭据。在另一个终端执行对应命令。
+### 2. 确认模型服务在运行
+
+启动 Ollama，用 `ollama list` 检查是否已安装默认模型 `qwen3.5:4b`。首次下载可运行 `ollama pull qwen3.5:4b`。使用其他兼容 Chat Completions 的服务时，按 [Agent 文档](docs/agent.md)配置模型地址。
+
+### 3. 在另一个终端启动助手
+
+**在企业微信使用**。首次配置时，若项目根目录还没有 `.env`，把 [.env.example](.env.example) 复制为 `.env`。确认 `.env` 中已填写 `WECOM_BOT_ID` 和 `WECOM_BOT_SECRET`，再执行下面的命令。
 
 ```powershell
-python -X utf8 -m agent.main
-python -X utf8 -m wecom.main --reset-memory true
+uv run python -X utf8 -m wecom.main --reset-memory true
 ```
 
-企业微信示例命令会保留现有会话记忆。省略 `--reset-memory` 时启动会清空旧记忆。账号绑定、群聊范围和记忆存放位置见[企业微信使用说明](docs/wecom.md)。
+看到「企业微信已认证」后，保持终端运行，再到企业微信单聊「会议室助手」。首次使用可发送「我的账号」，按[企业微信使用说明](docs/wecom.md)完成身份绑定。上述命令保留现有会话记忆。省略 `--reset-memory` 时，启动会清空旧记忆。
 
-修改 [services.toml](services.toml) 可设置 API 和 MCP 端口、数据库路径、测试人员及就绪超时，数据库相对路径以该配置文件所在目录为基准。使用 `python -X utf8 start_services.py --config 路径.toml` 可指定其他配置。改了 MCP 端口时，为 CLI 和企业微信设置 `MEETING_MCP_URL`。改了数据库路径时，为企业微信设置 `MEETING_DB_PATH`，供机器人和绑定命令使用。
+**在命令行使用**。在另一个终端执行下面的命令。
+
+```powershell
+uv run python -X utf8 -m agent.main
+```
+
+停止时，在助手所在终端按 Ctrl+C，再在第一个终端按 Ctrl+C 停止 API 和 MCP。
+
+### 自定义端口和数据库
+
+修改 [services.toml](services.toml) 可设置 API 和 MCP 端口、数据库路径、测试人员及就绪超时，数据库相对路径以该配置文件所在目录为基准。使用 `uv run python -X utf8 start_services.py --config 路径.toml` 可指定其他配置。改了 MCP 端口时，为 CLI 和企业微信设置 `MEETING_MCP_URL`。改了数据库路径时，为企业微信设置 `MEETING_DB_PATH`，供机器人和绑定命令使用。
 
 `testing.person_id` 用于 MCP 启动探测，也是命令行 Agent 的默认测试身份。企业微信单聊使用当前发送者绑定的人员编号。
 
@@ -97,12 +123,12 @@ meeting/
 在项目根目录运行回归测试。测试使用临时数据库和模拟模型响应。
 
 ```powershell
-python -X utf8 -m unittest discover -v
+uv run python -X utf8 -m unittest discover -v
 ```
 
 模型和 HTTP 工具可分别联调。第二条命令需要先启动 API 和 MCP。
 
 ```powershell
-python -X utf8 -m agent.test_qwen --ping
-python -X utf8 mcp_test.py
+uv run python -X utf8 -m agent.test_qwen --ping
+uv run python -X utf8 mcp_test.py
 ```

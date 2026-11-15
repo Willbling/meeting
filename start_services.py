@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent
 
 async def wait_until_ready(
     process: subprocess.Popen, name: str, check: Callable[[], Awaitable[None]], timeout: int,
+    *, probe_timeout: int = 2,
 ) -> None:
     deadline = monotonic() + timeout
     while process.poll() is None:
@@ -32,7 +33,7 @@ async def wait_until_ready(
         if remaining <= 0:
             raise RuntimeError(f"{name} 在 {timeout} 秒内未就绪，请查看服务输出。")
         try:
-            await asyncio.wait_for(check(), timeout=min(2, remaining))
+            await asyncio.wait_for(check(), timeout=min(probe_timeout, remaining))
         except (httpx.HTTPError, MCPError, RuntimeError, TimeoutError, OSError, ValueError):
             await asyncio.sleep(0.2)
         else:
@@ -84,7 +85,7 @@ async def run(config_file: Path) -> None:
                 raise RuntimeError("API 响应格式不匹配。")
 
         async def check_mcp() -> None:
-            async with Client(mcp_url, read_timeout_seconds=2) as client:
+            async with Client(mcp_url, read_timeout_seconds=4) as client:
                 if not (await client.list_tools()).tools:
                     raise RuntimeError("MCP 未提供工具。")
 
@@ -92,7 +93,7 @@ async def run(config_file: Path) -> None:
             api = launch("uvicorn", "api.main:app", "--host", "127.0.0.1", "--port", str(api_port))
             await wait_until_ready(api, "FastAPI", check_api, timeout)
             mcp = launch("mcp_server.server", "--port", str(mcp_port), "--config", str(config_file))
-            await wait_until_ready(mcp, "MCP", check_mcp, timeout)
+            await wait_until_ready(mcp, "MCP", check_mcp, timeout, probe_timeout=5)
             print(f"服务已就绪\nFastAPI: {api_url}/docs\nMCP: {mcp_url}\n数据库: {database}\n按 Ctrl+C 停止。", flush=True)
             while api.poll() is None and mcp.poll() is None:
                 await asyncio.sleep(0.3)
