@@ -69,7 +69,7 @@ class Interpretation(BaseModel):
 
     intent: Literal[
         "rooms", "bookings", "detail", "create", "reschedule", "cancel", "continue",
-        "confirm", "help", "unknown",
+        "confirm", "booking_status", "help", "unknown",
     ]
     starts_at: ApiDatetime | None = None
     ends_at: ApiDatetime | None = None
@@ -97,6 +97,7 @@ class Interpretation(BaseModel):
     any_room: bool | None = None
     selection: int | None = Field(default=None, ge=1, le=PAGE_SIZE)
     date_hint: str | None = None
+    date_reference: str | None = None
     keep_original_time: bool | None = None
     room_info: bool = False
 
@@ -130,6 +131,17 @@ class WorkflowMemory:
     last_written_booking: str | None = None
     booking_search: BookingSearch | None = None
     question: MeetingQuestion | None = None
+
+    def step(self) -> str | None:
+        if self.uncertain:
+            return "待核实提交结果"
+        if self.pending:
+            return f"{LABELS[self.pending.intent]}待确认"
+        if self.draft:
+            if self.draft.choice_kind == "room":
+                return f"{LABELS[self.draft.intent]}待选会议室"
+            return f"{LABELS[self.draft.intent]}草稿待补充"
+        return "有近期提交记录" if self.last_written_booking else None
 
 
 def window(item: dict) -> str:
@@ -171,12 +183,12 @@ class BookingWorkflow(WorkflowMemory):
             if draft is None:
                 return None
             choices = [{key: item[key] for key in (
-                "booking_id", "name", "job_title", "job_level", "subject", "starts_at", "room_name",
+                "booking_id", "room_id", "name", "job_title", "job_level", "subject", "starts_at", "room_name",
             ) if key in item} for item in draft.choices]
             return {"intent": draft.intent, "fields": draft.fields, "choice_kind": draft.choice_kind,
                     "choices": choices, "attendee_source": draft.attendee_source}
 
-        return {"draft": compact(self.draft), "query": compact(self.query),
+        return {"draft": compact(self.draft), "query": compact(self.query), "booking_step": self.step(),
                 "waiting_for_confirmation": self.pending.intent if self.pending else None,
                 "last_booking": self.last_booking, "last_written_booking": self.last_written_booking,
                 "booking_search": self.booking_search.context() if self.booking_search else None}
@@ -234,8 +246,6 @@ class BookingWorkflow(WorkflowMemory):
                     self.query.choice_kind, self.query.choices = previous.choice_kind, previous.choices
             draft = self.query
 
-        if intent in WRITES:
-            self.pending = None
         if meaning.room_info and meaning.intent == "continue":
             if draft.choice_kind != "room" or not draft.choices:
                 return "目前没有可引用的会议室候选。可以先查空闲会议室，再问某间房的地址或容量。"
@@ -248,9 +258,11 @@ class BookingWorkflow(WorkflowMemory):
             if len(matches) == 1:
                 return self.room_line(matches[0])
             return "你想了解哪间会议室？请提供刚才列表里的序号或名称。"
+        if intent in WRITES:
+            self.pending = None
         updates = meaning.model_dump(mode="json", exclude_none=True,
                                      exclude={"intent", "selection", "room_info", "recent_booking",
-                                              "target_date_hint", "use_booking_search"})
+                                              "target_date_hint", "use_booking_search", "date_reference"})
         if intent in ("reschedule", "cancel"):
             if meaning.target_date_hint:
                 bounds = whole_day(meaning.target_date_hint, datetime.now(BEIJING).date())
@@ -292,7 +304,7 @@ class BookingWorkflow(WorkflowMemory):
                 if key not in updates:
                     fields.pop(key, None)
         if intent != "rooms" and ("starts_at" in updates or "ends_at" in updates):
-            if "date_hint" not in updates:
+            if "date_hint" not in updates and intent != "create":
                 fields.pop("date_hint", None)
             if "keep_original_time" not in updates:
                 fields.pop("keep_original_time", None)
@@ -514,7 +526,7 @@ class BookingWorkflow(WorkflowMemory):
                 fields.get("capacity", 1), fields.get("attendee_count", 1), 1 + len(member_names),
             ), intervals=True)
             if len(rooms) > 1 and not fields.get("any_room"):
-                return self.choose(draft, "room", rooms, self.room_line, "这些会议室有合适的空闲段，你想选哪间？")
+                return self.ask_for_room(draft, rooms, "这些会议室有合适的空闲段，你想选哪间？")
             for room in rooms:
                 for slot in room["free_intervals"]:
                     left, right = (datetime.fromisoformat(slot[key]) for key in ("starts_at", "ends_at"))
@@ -573,7 +585,7 @@ class BookingWorkflow(WorkflowMemory):
         if not rooms:
             return "当前条件下查不到可用的会议室。可以换个时段、会议室或人数。"
         if len(rooms) > 1 and not fields.get("any_room"):
-            return self.choose(draft, "room", rooms, self.room_line, "这些会议室可用，你想订哪间？")
+            return self.ask_for_room(draft, rooms, f"{window(fields)}这些会议室可用，你想订哪间？")
         room = rooms[0]
         arguments = {key: fields[key] for key in ("subject", "starts_at", "ends_at")}
         arguments.update(room_id=room["room_id"], host_id=host["person_id"], member_ids=member_ids)
@@ -672,7 +684,7 @@ class BookingWorkflow(WorkflowMemory):
             if not rooms:
                 return f"新条件下查不到可用会议室。原预约仍在：{booking_line(item)}"
             if len(rooms) > 1 and not fields.get("any_room"):
-                return self.choose(draft, "room", rooms, self.room_line, "请选择改期后的会议室。")
+                return self.ask_for_room(draft, rooms, "请选择改期后的会议室。")
             room = rooms[0]
             changes["room_id"] = new["room_id"] = room["room_id"]
             new["room_name"], new["room_address"] = room["name"], room["address"]
@@ -716,6 +728,27 @@ class BookingWorkflow(WorkflowMemory):
     def stage(self, application: Application) -> str:
         self.pending = application
         return f"请核对{self.application_label(application)}申请：\n{application.summary}\n回复「确认」提交，或直接告诉我要修改的内容。"
+
+    def ask_for_room(self, draft: Draft, rooms: list[dict], question: str) -> str:
+        return self.needs("room_selection_needed", ("room_id",), "从候选中选择会议室。",
+                          self.choose(draft, "room", rooms, self.room_line, question))
+
+    async def booking_status(self) -> str:
+        if self.uncertain:
+            return await self.reconcile()
+        if self.pending:
+            return f"还没提交，正在等你确认。\n{self.pending.summary}\n回复「确认」即可提交。"
+        if self.draft:
+            label = LABELS[self.draft.intent]
+            detail = "目前在等你选会议室。" if self.draft.choice_kind == "room" else "还有条件需要补齐，可接着告诉我。"
+            return f"{label}申请还没提交。{detail}"
+        if self.last_written_booking:
+            try:
+                item = await self.call("get_booking", booking_id=self.last_written_booking)
+            except ToolFailure as error:
+                return f"暂时无法核实上一笔预约。{error}"
+            return f"最近提交的预约是{booking_line(item)}，当前状态为「{item['status']}」。"
+        return "这次对话还没有提交回执。你也可以让我查一下你的预约。"
 
     @staticmethod
     def application_label(application: Application) -> str:

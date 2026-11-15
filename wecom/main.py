@@ -5,6 +5,7 @@ import os
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -15,7 +16,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from agent.main import AgentError, AgentMemory, MainAgent, agent_factory
 from api.main import DEFAULT_DATABASE
-from api.models import PersonId
+from api.models import BEIJING, PersonId
 from api.store import connect
 
 from . import memory
@@ -44,7 +45,7 @@ def bind_user(database: Path, person_id: str, user_id: str) -> None:
 
 async def message_reply(
     body: dict, database: Path, create_agent: Callable[..., MainAgent],
-    memory_dir: Path, bot_name: str = "会议室助手",
+    memory_dir: Path, bot_name: str = "会议室助手", *, request_time: datetime | None = None,
 ) -> str | None:
     channel = body.get("chattype")
     if channel not in {"single", "group"}:
@@ -92,7 +93,7 @@ async def message_reply(
         await asyncio.to_thread(memory.save, path, person_id, snapshot)
 
     agent.save_memory = save
-    answer = await agent.reply(text)
+    answer = await agent.reply(text, request_time=request_time)
     try:
         await agent.checkpoint()
     except OSError as error:
@@ -131,6 +132,7 @@ def create_bot(
 
     @bot.on("message.text")
     async def on_text(frame: dict) -> None:
+        request_time = datetime.now(BEIJING)
         body = frame.get("body") or {}
         msg_id = body.get("msgid")
         if msg_id:
@@ -150,7 +152,7 @@ def create_bot(
             started = channel in {"single", "group"} and (text or body.get("quote")) and text != "我的账号"
             if started:
                 await bot.reply_stream(frame, stream_id, "正在处理…", False)
-            reply = await message_reply(body, database, create_agent, memory_dir, bot_name)
+            reply = await message_reply(body, database, create_agent, memory_dir, bot_name, request_time=request_time)
             if reply is not None or started:
                 await bot.reply_stream(frame, stream_id, reply or "请发一条你想让我处理的消息。", True)
 
@@ -172,7 +174,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="企业微信会议室助手")
     parser.add_argument("--bind", nargs=2, metavar=("PERSON_ID", "USER_ID"), help="绑定本地人员与企业微信账号")
     parser.add_argument("--memory-dir", type=Path, default=MEMORY_DIR, help="对话记忆文件夹")
-    parser.add_argument("--reset-memory", action="store_true", help="启动前清空单聊和群聊记忆文件")
+    parser.add_argument(
+        "--reset-memory", type=str.casefold, choices=("true", "false"), default="false",
+        help="false 清空对话记忆后启动（默认），true 保留对话记忆",
+    )
     args = parser.parse_args()
     database = Path(os.getenv("MEETING_DB_PATH") or DEFAULT_DATABASE)
     if args.bind:
@@ -195,7 +200,7 @@ def main() -> None:
     LOG.info("正在连接企业微信智能机器人…")
     try:
         args.memory_dir.mkdir(parents=True, exist_ok=True)
-        if args.reset_memory:
+        if args.reset_memory == "false":
             memory.reset(args.memory_dir)
             LOG.info("单聊和群聊的记忆已清空。")
         asyncio.run(run_bot(bot_id, secret, database, args.memory_dir, bot_name))

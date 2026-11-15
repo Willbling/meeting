@@ -1,6 +1,8 @@
 # 企业微信会议室助手
 
-在项目根目录打开 PowerShell，使用 Conda 的 `py313` 环境安装依赖并启动会议室 API 和 MCP。单聊使用 Ollama，需要启动 Ollama 并准备 `qwen3.5:4b`，也可按 Agent 文档配置其他模型。
+在项目根目录打开 PowerShell，使用 Conda 的 `py313` 环境安装依赖并启动会议室 API 和 MCP。单聊和群聊使用 Ollama，需要启动 Ollama 并准备 `qwen3.5:4b`，也可按 Agent 文档配置其他模型。
+
+[查看对话功能、会议请求流程图与记忆设计](conversation-design.md)。
 
 ```powershell
 conda activate py313
@@ -35,12 +37,12 @@ python -X utf8 -m wecom.main --bind P000001 "替换成刚收到的UserID"
 
 ## 对话记忆
 
-默认目录为项目下的 `data/wecom_memory/`。单聊文本文件在 `single/` 下，群聊文本文件在 `groups/<群标识>/` 下。文件名包含用户 ID 的可读部分和哈希。同一人在不同群内的对话与单聊分别保存。文件是 UTF-8 JSON 文本，保存普通聊天最近 4 轮及摘要，并保存会议最近 3 轮、最近查询和当前流程状态。
+默认目录为项目下的 `data/wecom_memory/`。单聊文本文件在 `single/` 下，群聊文本文件在 `groups/<群标识>/` 下。文件名包含用户 ID 的可读部分和哈希。同一人在不同群内的对话与单聊分别保存。文件是 UTF-8 JSON 文本，保存普通聊天最近 4 轮及摘要，并保存会议最近 3 轮、最近查询和当前流程状态。新记录附带该轮消息收到时的北京时间，旧记忆文件仍可读取。
 
-机器人收到新消息后读取对应文件，回复时更新文件。正常重启会自动恢复。可用 `--memory-dir` 选择其他目录。要清空旧对话并启动机器人，先停止正在运行的机器人，再执行：
+机器人收到新消息后读取对应文件，回复时更新文件。默认启动和显式传入 `--reset-memory false` 都会清空旧记忆。可用 `--memory-dir` 选择其他目录。需要保留旧记忆时，先停止正在运行的机器人，再传入 `true`：
 
 ```powershell
-python -X utf8 -m wecom.main --reset-memory
+python -X utf8 -m wecom.main --reset-memory true
 ```
 
-此命令清除该目录中机器人生成的对话记忆文件。已提交的预约和账号绑定仍可在数据库中查询。使用默认目录时，记忆文件由 Git 忽略。
+清空记忆只会删除该目录中机器人生成的对话记忆文件。已提交的预约和账号绑定仍可在数据库中查询。使用默认目录时，记忆文件由 Git 忽略。

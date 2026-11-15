@@ -1,6 +1,6 @@
 # 会议室预订系统
 
-项目使用 Conda `py313`。SQLite 存储人员、会议室和预约，FastAPI 提供业务接口，MCP 提供工具。命令行和企业微信单聊共用 Ollama Agent，企业微信群聊可查询空闲会议室。
+项目使用 Conda `py313`。SQLite 存储人员、会议室和预约，FastAPI 提供业务接口，MCP 提供工具。命令行、企业微信单聊和群聊共用 Ollama Agent。企业微信群聊支持普通聊天和查空闲会议室。
 
 ## 本地启动
 
@@ -29,3 +29,4 @@ python -X utf8 start_services.py
 - [MCP 服务与测试](mcp_server/README.md)
 - [命令行智能体与 Ollama 联调](agent/README.md)
 - [企业微信长连接、账号绑定及群聊](wecom/README.md)
+- [企业微信对话功能、会议请求流程图与记忆设计](wecom/conversation-design.md)

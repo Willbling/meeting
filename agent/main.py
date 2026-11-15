@@ -90,15 +90,33 @@ class MeetingResult:
     text: str
     issue: WorkflowIssue | None
     protected: bool
+    read_status: bool = False
+
+
+@dataclass
+class ConversationTurn:
+    user: str
+    assistant: str
+    at: str | None = None
+
+
+# Older files contain two-item arrays with no recorded time.
+type StoredTurn = ConversationTurn | tuple[str, str]
+
+
+def turn_data(turn: StoredTurn) -> dict:
+    if isinstance(turn, ConversationTurn):
+        return asdict(turn)
+    return asdict(ConversationTurn(*turn))
 
 
 @dataclass
 class AgentMemory:
-    chat_history: list[tuple[str, str]] = field(default_factory=list)
+    chat_history: list[StoredTurn] = field(default_factory=list)
     chat_summary: str = ""
-    unsummarized_chat: list[tuple[str, str]] = field(default_factory=list)
+    unsummarized_chat: list[StoredTurn] = field(default_factory=list)
     last_route: Literal["chat", "meeting"] = "chat"
-    meeting_history: list[tuple[str, str]] = field(default_factory=list)
+    meeting_history: list[StoredTurn] = field(default_factory=list)
     workflow: WorkflowMemory = field(default_factory=WorkflowMemory)
 
 
@@ -124,12 +142,12 @@ def follow_up_schema(fields: tuple[str, ...]) -> type[BaseModel] | None:
         return None
     allowed = set(fields)
     if allowed & {"starts_at", "ends_at"}:
-        allowed.update(("starts_at", "ends_at", "date_hint", "duration_minutes", "flexible", "day_part"))
+        allowed.update(("starts_at", "ends_at", "date_hint", "date_reference", "duration_minutes", "flexible", "day_part"))
     return field_schema("MeetingFollowUp", allowed)
 
 
 CREATE_FIELDS = field_schema("NewBookingFields", {
-    "starts_at", "ends_at", "date_hint", "duration_minutes", "subject", "host", "members",
+    "starts_at", "ends_at", "date_hint", "date_reference", "duration_minutes", "subject", "host", "members",
     "content", "capacity", "room_id", "room_name", "any_room", "selection", "attendee_count", "flexible", "day_part",
 })
 BOOKING_TARGET_FIELDS = field_schema("BookingTargetFields", {
@@ -160,11 +178,13 @@ class MeetingAgent:
         self.group = group
         self.quoted_message: str | None = None
         self.prompt = (DIRECTORY / "prompts.md").read_text(encoding="utf-8")
-        self.history: deque[tuple[str, str]] = deque(maxlen=3)
+        self.history: deque[StoredTurn] = deque(maxlen=3)
+        self.request_time: datetime | None = None
         self.validators: dict[str, Draft202012Validator] = {}
         self.workflow = BookingWorkflow(self.execute, person_id)
         self.lock = asyncio.Lock()
         self.trace = False
+        self.read_status = False
 
     async def discover_tools(self) -> None:
         available = (await self.client.list_tools()).tools
@@ -202,21 +222,26 @@ class MeetingAgent:
 
     async def handle(
         self, text: str, *, trace: bool = False, guidance: str | None = None,
-        follow_up: "MeetingQuestion | None" = None,
+        follow_up: "MeetingQuestion | None" = None, request_time: datetime | None = None, remember: bool = True,
     ) -> MeetingResult:
         async with self.lock:
             self.trace = trace
+            self.read_status = False
+            self.request_time = request_time or datetime.now(BEIJING)
             self.workflow.issue = None
             critical = bool(self.workflow.pending or self.workflow.uncertain)
             answer = await self.respond(text, guidance=guidance, follow_up=follow_up)
-            if guidance and self.history and self.history[-1][0] == text[:600]:
-                self.history.pop()
-            self.history.append((text[:600], answer[:800]))
+            if remember:
+                self.record_turn(text, answer)
             protected = critical or bool(self.workflow.pending or self.workflow.uncertain)
             protected = protected or bool(re.search(
                 r"[ARP][0-9]{6}|^\d+\. |未成功|无法|没有|查不到|失败|冲突|无权", answer, re.MULTILINE,
             ))
-            return MeetingResult(answer, self.workflow.issue, protected)
+            return MeetingResult(answer, self.workflow.issue, protected, self.read_status)
+
+    def record_turn(self, text: str, answer: str) -> None:
+        at = self.request_time.isoformat(timespec="seconds") if self.request_time else None
+        self.history.append(ConversationTurn(text[:600], answer[:1000], at))
 
     async def respond(
         self, text: str, *, guidance: str | None = None, follow_up: "MeetingQuestion | None" = None,
@@ -270,10 +295,10 @@ class MeetingAgent:
         self, text: str, *, guidance: str | None = None, follow_up: "MeetingQuestion | None" = None,
     ) -> str:
         workflow = self.workflow
-        request_time = datetime.now(BEIJING)
+        request_time = self.request_time or datetime.now(BEIJING)
         now = request_time.isoformat(timespec="seconds")
         state = json.dumps({
-            "workflow": workflow.context(), "recent": list(self.history),
+            "workflow": workflow.context(), "recent": [turn_data(turn) for turn in self.history],
             "question_shown_to_user": asdict(follow_up) if follow_up else None,
             **({"quoted_message": self.quoted_message} if self.quoted_message else {}),
         }, ensure_ascii=False, separators=(",", ":"))
@@ -303,13 +328,14 @@ class MeetingAgent:
                     f"提取会议室预订条件。当前北京时间 {now}。只填原话明确给出的值，未知留空。"
                     "先提取主办人和其他与会人员。「我和陈宇的」表示 host=我、members=[陈宇]。"
                     "这句话只描述人员，subject 留空。只有原话明确给出会议议题或标题才填 subject。"
-                    "把明天等日期换算成 YYYY-MM-DD 填 date_hint，明确时长换算成 duration_minutes。"
+                    "把今天、明天等原词填入 date_hint，明确时长换算成 duration_minutes。"
                     "只有具体起止时刻才填带 +08:00 的 ISO 8601 时间。下午是时段提示，并未给出具体几点。"
                 )
             elif schema:
                 messages[0]["content"] = (
                     f"当前北京时间 {now}。根据 question_shown_to_user，从本轮消息提取用户刚补充的字段。"
                     "开始或结束时刻优先沿用草稿中的日期，使用带 +08:00 的 ISO 8601 整秒时间。"
+                    "如果本轮另外指定日期，在 date_reference 原样引用日期表达，并填 date_hint；只补时刻则两项留空。"
                     "主题使用原文。用户未给出的值留空；已知时长由程序用来计算结束时刻。"
                 )
                 if schema is BOOKING_TARGET_FIELDS:
@@ -339,10 +365,8 @@ class MeetingAgent:
             else:
                 meaning = await self.model.interpret(messages, trace=self.trace)
         except AgentError as error:
-            workflow.pending = None
             return f"暂时无法理解这条请求。{error}可以稍后重试。"
         except ValidationError:
-            workflow.pending = None
             return "暂时无法理解这条请求，模型返回的信息格式有误。请把操作、日期和时间分开说清楚。"
         if self.trace:
             print(f"[意图] {meaning.intent}", flush=True)
@@ -353,6 +377,9 @@ class MeetingAgent:
             return "群聊可以查空闲会议室。个人预约查询和办理请在单聊里继续。"
         if self.group and meaning.intent == "help":
             return "可以在群里查询空闲会议室、地址和容量。个人预约和办理请单聊。"
+        if meaning.intent == "booking_status":
+            self.read_status = True
+            return await workflow.booking_status()
         if meaning.intent == "confirm" and not guidance and workflow.pending:
             command = text.strip().rstrip("。！!").strip()
             matches = {"create": ("预订", "预定", "订"), "reschedule": ("改",), "cancel": ("取消",)}
@@ -364,13 +391,18 @@ class MeetingAgent:
             return workflow.needs("explicit_confirmation_needed", ("confirmation",),
                                   "整句可能有附加条件。问还有什么要补充，提醒核对后单独回复确认。",
                                   "这句话可能还有要补充的内容。请先说完整，或单独回复「确认」提交。")
-        if meaning.intent == "unknown":
-            workflow.pending = None
         if follow_up and meaning.intent == "continue" and set(follow_up.fields) & {
             "subject", "starts_at", "ends_at", "new_time_or_room",
         }:
             meaning = meaning.model_copy(update={"room_info": False})
         current = workflow.query or workflow.draft
+        if follow_up and "room_id" in follow_up.fields and workflow.draft and workflow.draft.choice_kind == "room":
+            for index, room in enumerate(workflow.draft.choices, 1):
+                if text.strip() in (room["name"], room["room_id"]):
+                    meaning = Interpretation(intent="continue", selection=index)
+                    break
+            if meaning.intent == "continue" and not meaning.room_info:
+                current = workflow.draft
         if (move := SAME_TIME_MOVE.fullmatch(text.strip())) and (
             meaning.intent in {"reschedule", "continue"} or (current and current.intent == "bookings")
         ):
@@ -387,6 +419,33 @@ class MeetingAgent:
                 intent="reschedule", date_hint=bounds["starts_at"][:10], keep_original_time=True,
                 use_booking_search=bool(workflow.query and workflow.query.intent == "bookings"),
             )
+        if meaning.intent == "reschedule":
+            # The model chooses the operation. Preserve an explicit same-time constraint even if it omits the flag.
+            same_time = meaning.keep_original_time or any(
+                phrase in text for phrase in ("同样时间", "相同时间", "原时段", "同一时间", "原时间")
+            )
+            refers_to_listing = bool(
+                workflow.query and workflow.query.intent == "bookings"
+                and any(phrase in text for phrase in ("这个会议", "这场会议", "这次会议", "刚查到"))
+            )
+            hint = meaning.date_hint
+            if meaning.date_reference in RELATIVE_DAYS and meaning.date_reference in text:
+                hint = meaning.date_reference
+            else:
+                destinations = [day for day in RELATIVE_DAYS if any(
+                    f"{verb}{day}" in text for verb in ("改成", "改到", "挪到", "改为", "移到")
+                )]
+                if len(destinations) == 1:
+                    hint = destinations[0]
+            if same_time and hint and (bounds := whole_day(hint, request_time.date())):
+                meaning = meaning.model_copy(update={
+                    "date_hint": bounds["starts_at"][:10], "keep_original_time": True,
+                })
+            if refers_to_listing and same_time and not (meaning.booking_id or meaning.selection):
+                meaning = meaning.model_copy(update={
+                    "use_booking_search": True, "recent_booking": False,
+                    "target_date_hint": None, "target_start": None, "target_end": None,
+                })
         if meaning.intent == "rooms" or (meaning.intent == "continue" and current and current.intent == "rooms"):
             days = [day for day in RELATIVE_DAYS if day in text]
             parts = [part for word, part in DAY_PART_WORDS.items() if word in text]
@@ -450,6 +509,30 @@ class MeetingAgent:
             if workflow.query and workflow.query.intent == "rooms" and meaning.intent == "create":
                 if not re.search(r"[点时:：]", text):
                     meaning = meaning.model_copy(update={"starts_at": None, "ends_at": None})
+            previous_day = current.fields.get("date_hint") if meaning.intent == "continue" else None
+            time_text = text
+            for value in (meaning.subject, meaning.content):
+                if value:
+                    time_text = time_text.replace(value, "")
+            relative_days = [day for day in RELATIVE_DAYS if day in time_text]
+            hint = meaning.date_hint
+            if previous_day and not (
+                (meaning.date_reference and meaning.date_reference in time_text)
+                or (hint and hint in time_text)
+            ):
+                hint = previous_day
+            if len(relative_days) == 1:
+                hint = relative_days[0]
+            if hint and (bounds := whole_day(hint, request_time.date())):
+                day = date.fromisoformat(bounds["starts_at"][:10])
+                updates = {"date_hint": day.isoformat()}
+                if anchor := meaning.starts_at or meaning.ends_at:
+                    shift = day - anchor.astimezone(BEIJING).date()
+                    updates.update({
+                        key: value.astimezone(BEIJING) + shift
+                        for key in ("starts_at", "ends_at") if (value := getattr(meaning, key)) is not None
+                    })
+                meaning = meaning.model_copy(update=updates)
             if meaning.attendee_count is None and "座位" not in text and ("和" in text or "参会" in text or "参加" in text):
                 match = ATTENDEE_COUNT.search(text)
                 if match:
@@ -491,12 +574,16 @@ class MeetingAgent:
                     meaning = Interpretation.model_validate({
                         **meaning.model_dump(mode="json"), "date_hint": meaning.date_hint, **updates,
                     })
-        return await workflow.apply(meaning, attendee_source=attendee_source)
+        return await workflow.apply(
+            meaning, attendee_source=attendee_source,
+            resume_write=meaning.intent == "continue" and current is not None and current is workflow.draft,
+        )
 
 
 class Route(BaseModel):
     route: Literal["chat", "meeting"]
     new_request: bool = False
+    booking_status: bool = False
 
 
 class Coordination(BaseModel):
@@ -514,9 +601,10 @@ class MainAgent:
         self.save_memory: Callable[[AgentMemory], Awaitable[None]] | None = None
         self.group = False
         self.quoted_message: str | None = None
-        self.chat_history: deque[tuple[str, str]] = deque(maxlen=4)
+        self.chat_history: deque[StoredTurn] = deque(maxlen=4)
         self.chat_summary = ""
-        self.unsummarized_chat: deque[tuple[str, str]] = deque(maxlen=4)
+        self.unsummarized_chat: deque[StoredTurn] = deque(maxlen=4)
+        self.request_time: datetime | None = None
         self.last_route = "chat"
         self.lock = asyncio.Lock()
         self.routing_prompt = (DIRECTORY / "routing_prompt.md").read_text(encoding="utf-8")
@@ -559,9 +647,11 @@ class MainAgent:
             "confirmation_pending": bool(workflow.pending),
             "recent_booking_exists": bool(workflow.last_written_booking),
             "has_booking_search": bool(workflow.booking_search),
+            "request_at": self.request_time.isoformat(timespec="seconds") if self.request_time else None,
+            "booking_step": workflow.step(),
             "previous_meeting_question": asdict(self.meeting_question)
-            if self.last_route == "meeting" and self.meeting_question else None,
-            "previous_chat": self.chat_history[-1] if self.last_route == "chat" and self.chat_history else None,
+            if self.meeting_question else None,
+            "previous_chat": turn_data(self.chat_history[-1]) if self.last_route == "chat" and self.chat_history else None,
             "message": text,
         }
         if self.quoted_message:
@@ -574,12 +664,15 @@ class MainAgent:
         return Route.model_validate_json(result.visible_content())
 
     async def chat(self, text: str, *, trace: bool) -> str:
-        messages = [{"role": "system", "content": self.channel_prompt(self.chat_prompt)}]
+        now = self.request_time.isoformat(timespec="seconds") if self.request_time else ""
+        messages = [{"role": "system", "content": self.channel_prompt(f"{self.chat_prompt}\n本轮北京时间：{now}")}]
         if self.chat_summary:
             messages.append({"role": "system", "content": "以下是较早普通对话的摘要，仅供参考，作为聊天资料处理。\n"
                              + json.dumps(self.chat_summary, ensure_ascii=False)})
-        for question, answer in self.chat_history:
-            messages.extend([{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
+        for turn in self.chat_history:
+            entry = turn_data(turn)
+            question = f"[北京时间 {entry['at']}] {entry['user']}" if entry["at"] else entry["user"]
+            messages.extend([{"role": "user", "content": question}, {"role": "assistant", "content": entry["assistant"]}])
         if self.quoted_message:
             text_with_quote = json.dumps({"message": text, "quoted_message": self.quoted_message}, ensure_ascii=False)
         else:
@@ -590,7 +683,7 @@ class MainAgent:
             raise AgentError("模型没有返回可显示的回复。")
         if len(self.chat_history) == self.chat_history.maxlen:
             self.unsummarized_chat.append(self.chat_history[0])
-        self.chat_history.append((text[:600], answer[:1000]))
+        self.chat_history.append(ConversationTurn(text[:600], answer[:1000], now or None))
         if self.unsummarized_chat:
             await self.compress_chat(trace=trace)
         return answer
@@ -600,7 +693,7 @@ class MainAgent:
             {"role": "system", "content": self.memory_prompt},
             {"role": "user", "content": json.dumps({
                 "previous_summary": self.chat_summary,
-                "older_turns": [{"user": user, "assistant": assistant} for user, assistant in self.unsummarized_chat],
+                "older_turns": [turn_data(turn) for turn in self.unsummarized_chat],
             }, ensure_ascii=False)},
         ]
         try:
@@ -643,7 +736,7 @@ class MainAgent:
     ) -> str:
         assert self.meeting is not None
         if result.issue:
-            if result.issue.reason == "booking_target_multiple":
+            if result.issue.reason in {"booking_target_multiple", "room_selection_needed"}:
                 return self.remember_question(result.text, result.issue)
             messages = [
                 {"role": "system", "content": self.channel_prompt(self.coordination_prompt)},
@@ -661,13 +754,20 @@ class MainAgent:
             if trace:
                 print(f"[主 Agent 协调] {decision.action}", flush=True)
             if decision.action == "retry" and decision.message.strip() and not result.protected:
-                result = await self.meeting.handle(text, guidance=decision.message[:500], follow_up=follow_up, trace=trace)
+                result = await self.meeting.handle(text, guidance=decision.message[:500], follow_up=follow_up,
+                                                   trace=trace, request_time=self.request_time, remember=False)
                 if result.issue:
                     return self.remember_question(result.text, result.issue)
             elif decision.message.strip() and decision.action == "ask" and (
                 not result.protected or result.issue.reason == "explicit_confirmation_needed"
             ):
-                return self.remember_question(decision.message.strip(), result.issue, decision.requested_fields)
+                question = decision.message.strip()
+                draft = self.meeting.workflow.draft
+                if draft and result.issue.reason == "booking_fields_missing":
+                    dates = re.findall(r"\d{4}-\d{2}-\d{2}", question)
+                    if dates and any(day != draft.fields.get("date_hint") for day in dates):
+                        return self.remember_question(result.text, result.issue)
+                return self.remember_question(question, result.issue, decision.requested_fields)
             elif decision.action == "answer":
                 return await self.present(text, result.text, preserve_result=result.protected, trace=trace)
             else:
@@ -682,14 +782,14 @@ class MainAgent:
         self.meeting.workflow.question = MeetingQuestion(text, fields or issue.needed)
         return text
 
-    async def reply(self, text: str, *, trace: bool = False) -> str:
+    async def reply(self, text: str, *, trace: bool = False, request_time: datetime | None = None) -> str:
         async with self.lock:
+            self.request_time = (request_time or datetime.now(BEIJING)).astimezone(BEIJING)
             try:
                 routing = await self.route(text, trace=trace)
-                route = routing.route
+                route = "meeting" if routing.booking_status and not self.group else routing.route
                 follow_up = (
-                    self.meeting_question if self.last_route == "meeting" and route == "meeting"
-                    and not routing.new_request else None
+                    self.meeting_question if route == "meeting" and not (routing.new_request or routing.booking_status) else None
                 )
                 self.last_route = route
                 if trace:
@@ -702,10 +802,19 @@ class MainAgent:
                         self.meeting.history.extend(self.memory.meeting_history)
                         self.meeting.workflow.restore(self.memory.workflow)
                     self.meeting.workflow.before_write = self.checkpoint if self.save_memory else None
+                previous_question = self.meeting.workflow.question
                 self.meeting.workflow.question = None
                 self.meeting.quoted_message = self.quoted_message
-                result = await self.meeting.handle(text, follow_up=follow_up, trace=trace)
-                return await self.coordinate(text, result, follow_up=follow_up, trace=trace)
+                result = await self.meeting.handle(text, follow_up=follow_up, trace=trace,
+                                                   request_time=self.request_time, remember=False)
+                if result.read_status:
+                    if self.meeting.workflow.draft or self.meeting.workflow.query or self.meeting.workflow.uncertain:
+                        self.meeting.workflow.question = previous_question
+                    answer = result.text
+                else:
+                    answer = await self.coordinate(text, result, follow_up=follow_up, trace=trace)
+                self.meeting.record_turn(text, answer)
+                return answer
             except ValidationError:
                 return "刚才没能判断你想聊聊还是办理会议预约，可以换个说法再试一次。"
             except AgentError as error:

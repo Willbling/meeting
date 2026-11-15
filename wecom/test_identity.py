@@ -1,9 +1,10 @@
 import json
+import sys
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from agent.main import AgentMemory, MainAgent, MeetingAgent, ModelMessage
 from agent.workflow import Application, Interpretation, WorkflowMemory
@@ -12,7 +13,7 @@ from data.sqlite.init_db import initialize
 from mcp_server.client import result
 
 from . import memory
-from .main import bind_user, message_reply
+from .main import bind_user, main, message_reply
 
 
 class WeComIdentityTest(unittest.IsolatedAsyncioTestCase):
@@ -50,11 +51,11 @@ class WeComIdentityTest(unittest.IsolatedAsyncioTestCase):
         agent.group = group
         return agent
 
-    async def send(self, user, text, chat=None):
+    async def send(self, user, text, chat=None, *, at=None):
         return await message_reply({
             "chattype": "group" if chat else "single", "chatid": chat,
             "from": {"userid": user}, "text": {"content": text},
-        }, self.database, self.create_agent, self.memory_dir)
+        }, self.database, self.create_agent, self.memory_dir, request_time=at)
 
     async def test_sender_binding_and_saved_chat(self) -> None:
         self.assertIn("联系管理员", await self.send("unbound", "查看我的预约"))
@@ -103,6 +104,44 @@ class WeComIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("单聊", await self.send("ZhangYueHui", "@会议室助手 查我的预约", "group1"))
         self.tool.assert_not_awaited()
 
+    async def test_booking_continues_across_midnight_with_saved_turns(self) -> None:
+        first = (datetime.now(BEIJING) + timedelta(days=1)).replace(hour=23, minute=59, second=0, microsecond=0)
+        second = first + timedelta(minutes=2)
+        day, stale_day = second.date(), second.date() + timedelta(days=1)
+        rooms = [
+            {"room_id": "R000001", "name": "三楼大会议室", "capacity": 12, "address": "301"},
+            {"room_id": "R000002", "name": "二楼讨论室", "capacity": 6, "address": "205"},
+        ]
+        self.tool.side_effect = [result({"items": rooms}), result({"items": rooms})]
+        self.responses.extend([
+            {"route": "meeting"}, {"intent": "create", "subject": "降雨预报项目总结", "date_hint": str(first.date())},
+            {"action": "ask", "message": f"{first.date()} 的会议是几点？"},
+            {"route": "meeting"},
+            {"date_hint": str(stale_day), "starts_at": f"{stale_day}T10:00:00+08:00",
+             "ends_at": f"{stale_day}T12:00:00+08:00"},
+            {"route": "meeting"}, {"intent": "continue", "room_name": "二楼讨论室", "room_info": True}, "",
+            {"route": "meeting", "booking_status": True}, {"intent": "booking_status"},
+        ])
+        user = "ZhangYueHui"
+        start = await self.send(user, "给我明天安排一个会议室，会议主题是降雨预报项目总结", at=first)
+        self.assertIn(str(day), start)
+        question = await self.send(user, "早上10点到12点", at=second)
+        self.assertIn("你想订哪间", question)
+        self.assertIn(first.isoformat(), str(self.requests[4]))
+        self.assertIn(start, str(self.requests[4]))
+        self.assertEqual(self.tool.await_args.args[1]["starts_at"], f"{day}T10:00:00+08:00")
+        preview = await self.send(user, "二楼讨论室", at=second)
+        self.assertIn("请核对预订申请", preview)
+        self.assertIn("二楼讨论室", preview)
+        self.assertIn("还没提交，正在等你确认", await self.send(user, "预定了吗", at=second))
+        self.assertEqual([call.args[0] for call in self.tool.await_args_list], ["find_available_rooms"] * 2)
+        path = self.memory_dir / "single" / f"{memory.file_key(user)}.txt"
+        saved = memory.load(path, "P000001")
+        self.assertEqual(saved.meeting_history[-2].assistant, preview)
+        self.assertEqual(saved.meeting_history[-2].at, second.isoformat())
+        self.assertEqual(saved.workflow.pending.arguments["room_id"], "R000002")
+        self.assertEqual(saved.workflow.pending.arguments["ends_at"], f"{day}T12:00:00+08:00")
+
     async def test_confirmation_checkpoints_before_writing(self) -> None:
         user = "ZhangYueHui"
         path = self.memory_dir / "single" / f"{memory.file_key(user)}.txt"
@@ -132,8 +171,11 @@ class WeComIdentityTest(unittest.IsolatedAsyncioTestCase):
     def test_reset_and_typed_memory(self) -> None:
         path = self.memory_dir / "single" / f"{memory.file_key('id')}.txt"
         pending = Application("cancel", {"booking_id": "A000009"}, "测试", known_ids=frozenset({"A000009"}))
-        memory.save(path, "P000001", AgentMemory(workflow=WorkflowMemory(uncertain=pending)))
+        memory.save(path, "P000001", AgentMemory(
+            meeting_history=[("旧问题", "旧回答")], workflow=WorkflowMemory(uncertain=pending),
+        ))
         self.assertEqual(memory.load(path, "P000001").workflow.uncertain, pending)
+        self.assertEqual(memory.load(path, "P000001").meeting_history, [("旧问题", "旧回答")])
         self.assertIsNone(memory.load(path, "P000002"))
         unrelated = path.parent / "keep.txt"
         unrelated.write_text("保留", encoding="utf-8")
@@ -143,3 +185,21 @@ class WeComIdentityTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(path.exists())
         self.assertFalse(group_path.exists())
         self.assertTrue(unrelated.exists())
+
+
+class WeComStartupMemoryTest(unittest.TestCase):
+    def test_startup_clears_memory_unless_true(self) -> None:
+        root = Path(self.enterContext(TemporaryDirectory()))
+        path = root / "single" / f"{memory.file_key('test-user')}.txt"
+        for args, should_keep in (([], False), (["--reset-memory", "true"], True), (["--reset-memory", "false"], False)):
+            with self.subTest(args=args):
+                memory.save(path, "P000001", AgentMemory())
+                argv = ["wecom.main", "--memory-dir", str(root), *args]
+                with (
+                    patch.object(sys, "argv", argv),
+                    patch("wecom.main.dotenv_values", return_value={"WECOM_BOT_ID": "test", "WECOM_BOT_SECRET": "test"}),
+                    patch("wecom.main.run_bot", new_callable=AsyncMock) as run_bot,
+                ):
+                    main()
+                run_bot.assert_awaited_once()
+                self.assertEqual(path.exists(), should_keep)

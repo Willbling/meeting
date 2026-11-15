@@ -116,9 +116,8 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await main.reply("周末去哪玩？"), "周末可以去公园走走。")
         self.assertIs(self.agent.workflow.pending, application)
         chat_request = self.requests[-1]
-        self.assertEqual([entry["content"] for entry in chat_request["messages"][1:]], [
-            "你好", "你好！", "周末去哪玩？",
-        ])
+        self.assertTrue(chat_request["messages"][1]["content"].endswith("+08:00] 你好"))
+        self.assertEqual([entry["content"] for entry in chat_request["messages"][2:]], ["你好！", "周末去哪玩？"])
         route_request = self.requests[-2]
         self.assertNotIn("内部排期", str(route_request))
         self.assertIn("内部排期", await main.reply("继续申请"))
@@ -135,18 +134,21 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
             {"route": "chat"}, "回答 5", "用户偏好短答。",
             {"route": "chat"}, "回答 6", "用户偏好短答，正在讨论写作。",
         ])
+        at = datetime(2026, 11, 15, 9, tzinfo=BEIJING)
         for n in range(1, 7):
-            self.assertEqual(await main.reply(f"普通问题 {n}"), f"回答 {n}")
-        self.assertEqual(list(main.chat_history), [(f"普通问题 {n}", f"回答 {n}") for n in range(3, 7)])
+            self.assertEqual(await main.reply(f"普通问题 {n}", request_time=at + timedelta(minutes=n)), f"回答 {n}")
+        self.assertEqual([(turn.user, turn.assistant) for turn in main.chat_history],
+                         [(f"普通问题 {n}", f"回答 {n}") for n in range(3, 7)])
         self.assertEqual(main.chat_summary, "用户偏好短答，正在讨论写作。")
         summary_request = json.loads(self.requests[-1]["messages"][-1]["content"])
         self.assertEqual(summary_request, {
             "previous_summary": "用户偏好短答。",
-            "older_turns": [{"user": "普通问题 2", "assistant": "回答 2"}],
+            "older_turns": [{"user": "普通问题 2", "assistant": "回答 2",
+                             "at": (at + timedelta(minutes=2)).isoformat()}],
         })
         available = [entry["content"] for entry in self.requests[-2]["messages"]]
-        self.assertNotIn("普通问题 1", available)
-        self.assertIn("普通问题 2", available)
+        self.assertFalse(any("普通问题 1" in content for content in available))
+        self.assertTrue(any(content.endswith("普通问题 2") for content in available))
         self.assertIn("用户偏好短答。", available[1])
         self.assertNotIn("private chain", str(self.requests))
         parsed = ModelMessage.model_validate({"role": "assistant", "content": "可见",
@@ -415,3 +417,27 @@ class WorkflowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.agent.workflow.pending)
         self.assertIn("请核对改期申请", await main.reply("第二场"))
         self.assertEqual(self.agent.workflow.pending.arguments["booking_id"], second["booking_id"])
+
+    async def test_reschedule_is_parsed_even_when_router_marks_it_as_status(self) -> None:
+        main = MainAgent(self.agent.model, AsyncMock(return_value=self.agent))
+        now = datetime.now(BEIJING)
+        original_day = now.date()
+        next_day = original_day + timedelta(days=1)
+        booking = {
+            **self.booking, "booking_id": "A000009",
+            "starts_at": f"{original_day}T14:00:00+08:00", "ends_at": f"{original_day}T15:00:00+08:00",
+        }
+        self.mock_tool.side_effect = [{"items": [booking]}, booking]
+        self.responses.extend([
+            {"route": "meeting"}, {"intent": "bookings", "date_hint": "今天"}, "",
+            {"route": "meeting", "booking_status": True},
+            {"intent": "reschedule", "target_date_hint": "明天"}, "",
+        ])
+        self.assertIn("A000009", await main.reply("查看一下我今天的会议", request_time=now))
+        preview = await main.reply("把这个会议改成明天同样时间点，其他信息不变", request_time=now)
+        self.assertIn("请核对改期申请", preview)
+        self.assertEqual(self.agent.workflow.pending.arguments, {
+            "booking_id": "A000009",
+            "starts_at": f"{next_day}T14:00:00+08:00", "ends_at": f"{next_day}T15:00:00+08:00",
+        })
+        self.assertEqual([call.args[0] for call in self.mock_tool.await_args_list], ["list_my_bookings", "get_booking"])
